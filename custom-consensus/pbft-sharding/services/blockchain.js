@@ -15,7 +15,7 @@ class Blockchain {
     // pushes confirmed blocks into the chain
     addBlock(block) {
       this.chain.push(block);
-    //   console.log("NEW BLOCK ADDED TO CHAIN");
+      console.log("NEW BLOCK ADDED TO CHAIN");
       return block;
     }
   
@@ -34,6 +34,7 @@ class Blockchain {
     getProposer() {
       let index =
         this.chain[this.chain.length - 1].hash[0].charCodeAt(0) % NUMBER_OF_NODES;
+      index = 0;
       return this.validatorList[index];
     }
   
@@ -47,10 +48,10 @@ class Blockchain {
         Block.verifyBlock(block) &&
         Block.verifyProposer(block, this.getProposer())
       ) {
-        // console.log("BLOCK VALID");
+        console.log("BLOCK VALID");
         return true;
       } else {
-        // console.log("BLOCK INVALID");
+        console.log("BLOCK INVALID");
         return false;
       }
     }

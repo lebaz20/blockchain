@@ -48,22 +48,29 @@ app.get("/blocks", (req, res) => {
   res.json(blockchain.chain);
 });
 
+// check server health
+app.get("/health", (req, res) => {
+  res.status(200).send('Ok');
+});
+
+
 // creates transactions for the sent data
 app.post("/transaction", async (req, res) => {
   if (REDIRECT_TO_PORT) {
+    console.log(`Redirect from ${HTTP_PORT} to ${REDIRECT_TO_PORT}`);
     try {
         const response = await axios({
             method: req.method,
             url: `http://localhost:${REDIRECT_TO_PORT}/transaction`,
-            headers: req.headers,
+            // headers: req.headers,
             data: req.body
         });
-
         res.status(response.status).send(response.data);
     } catch (error) {
         res.status(error.response?.status || 500).send(error.message);
     }
   } else {
+    console.log(`Processing transaction on ${HTTP_PORT}`);
     const { data } = req.body;
     const transaction = wallet.createTransaction(data);
     p2pserver.broadcastTransaction(transaction);

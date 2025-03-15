@@ -36,7 +36,7 @@ class TransactionPool {
   
     // empties the pool
     clear() {
-    //   console.log("TRANSACTION POOL CLEARED");
+      console.log("TRANSACTION POOL CLEARED");
       this.transactions = [];
     }
   }

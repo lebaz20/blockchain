@@ -61,7 +61,7 @@ for (let index = 0; index < NUMBER_OF_NODES; index++) {
     promise.then(() => {
       initServer(envVars)
       if (index == NUMBER_OF_NODES - 1) {
-        console.log("########################All set! Ready for testing...########################");
+        console.log("########################...All set! Ready for testing...########################");
       }
     });
   } else {

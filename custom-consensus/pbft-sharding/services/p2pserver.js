@@ -48,32 +48,36 @@ class P2pserver {
     // Creates a server on a given port
     listen() {
       const server = new WebSocket.Server({ port: P2P_PORT });
-      server.on("connection", (socket) => {
-        console.log("new connection", P2P_PORT);
+      server.on("connection", (socket, req) => {
+        // console.log(`new connection from outside ${req.socket.remoteAddress}:${req.socket.remotePort} to ${P2P_PORT}`);
         this.connectSocket(socket);
+        this.messageHandler(socket);
       });
       this.connectToPeers();
-      console.log(`Listening for peer to peer connection on port : ${P2P_PORT}`);
+      // console.log(`Listening for peer to peer connection on port : ${P2P_PORT}`);
     }
   
     // connects to a given socket and registers the message handler on it
     connectSocket(socket, peer = P2P_PORT) {
       this.sockets.push(socket);
-      console.log("Socket connected", P2P_PORT, peer);
-      this.messageHandler(socket);
+      // console.log("Socket connected", P2P_PORT, peer);
     }
   
     // connects to the peers passed in command line
     connectToPeers() {
       peers.forEach(peer => {
         const socket = new WebSocket(peer);
-        socket.on("open", () => this.connectSocket(socket, peer));
+        socket.on("open", () => {
+          console.log(`new connection from inside ${P2P_PORT} to ${peer.split(':')[2]}`);
+          this.connectSocket(socket, peer)
+        });
       });
     }
   
     // broadcasts transactions
     broadcastTransaction(transaction) {
       this.sockets.forEach(socket => {
+        console.log("broadcastTransaction", P2P_PORT, this.sockets.length);
         this.sendTransaction(socket, transaction);
       });
     }
@@ -165,7 +169,7 @@ class P2pserver {
         }
         const data = JSON.parse(message);
   
-        // console.log("RECEIVED", data.type, P2P_PORT);
+        console.log("RECEIVED", data.type, P2P_PORT);
   
         // select a particular message handler
         switch (data.type) {
@@ -184,20 +188,20 @@ class P2pserver {
   
               // check if limit reached
               if (thresholdReached) {
-                // console.log("THRESHOLD REACHED", P2P_PORT);
+                console.log("THRESHOLD REACHED", P2P_PORT);
                 // check the current node is the proposer
                 if (this.blockchain.getProposer() == this.wallet.getPublicKey()) {
-                //   console.log("PROPOSING BLOCK", P2P_PORT);
+                  console.log("PROPOSING BLOCK", P2P_PORT);
                   // if the node is the proposer, create a block and broadcast it
                   let block = this.blockchain.createBlock(
                     this.transactionPool.transactions,
                     this.wallet
                   );
-                //   console.log("CREATED BLOCK", block, P2P_PORT);
+                  console.log("CREATED BLOCK", block, P2P_PORT);
                   this.broadcastPrePrepare(block);
                 }
               } else {
-                // console.log("Transaction Added", P2P_PORT);
+                console.log("Transaction Added", P2P_PORT);
               }
             }
             break;

@@ -13,7 +13,7 @@ class BlockPool {
     // pushes block to the chain
     addBlock(block) {
       this.blocks.push(block);
-    //   console.log("added block to pool");
+      console.log("added block to pool");
     }
   
     // returns the block for the given hash
