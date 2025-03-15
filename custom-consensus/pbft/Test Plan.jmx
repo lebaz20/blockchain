@@ -126,9 +126,10 @@
             </value>
           </objProp>
           <stringProp name="filename">/Users/mohamedlabib/www/thesis/custom-consensus/pbft/summary.csv</stringProp>
+          <boolProp name="useGroupName">true</boolProp>
         </ResultCollector>
         <hashTree/>
-        <ResultCollector guiclass="StatVisualizer" testclass="ResultCollector" testname="Aggregate Report" enabled="true">
+        <ResultCollector guiclass="StatVisualizer" testclass="ResultCollector" testname="Aggregate Report">
           <boolProp name="ResultCollector.error_logging">false</boolProp>
           <objProp>
             <name>saveConfig</name>
@@ -163,9 +164,10 @@
             </value>
           </objProp>
           <stringProp name="filename">/Users/mohamedlabib/www/thesis/custom-consensus/pbft/aggregate.csv</stringProp>
+          <boolProp name="useGroupName">true</boolProp>
         </ResultCollector>
         <hashTree/>
-        <ResultCollector guiclass="GraphVisualizer" testclass="ResultCollector" testname="Graph Results" enabled="true">
+        <ResultCollector guiclass="GraphVisualizer" testclass="ResultCollector" testname="Graph Results">
           <boolProp name="ResultCollector.error_logging">false</boolProp>
           <objProp>
             <name>saveConfig</name>
