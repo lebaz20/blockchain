@@ -54,7 +54,7 @@
           <intProp name="calcMode">0</intProp>
         </ConstantThroughputTimer>
         <hashTree/>
-        <ResultCollector guiclass="ViewResultsFullVisualizer" testclass="ResultCollector" testname="View Results Tree">
+        <ResultCollector guiclass="ViewResultsFullVisualizer" testclass="ResultCollector" testname="View Results Tree" enabled="true">
           <boolProp name="ResultCollector.error_logging">false</boolProp>
           <objProp>
             <name>saveConfig</name>
@@ -125,7 +125,7 @@
               <connectTime>true</connectTime>
             </value>
           </objProp>
-          <stringProp name="filename">/Users/mohamedlabib/www/thesis/custom-consensus/pbft-hybrid/summary.csv</stringProp>
+          <stringProp name="filename">/Users/mohamedlabib/www/thesis/custom-consensus/pbft-sharding/summary.csv</stringProp>
         </ResultCollector>
         <hashTree/>
         <ResultCollector guiclass="StatVisualizer" testclass="ResultCollector" testname="Aggregate Report">
@@ -162,7 +162,7 @@
               <connectTime>true</connectTime>
             </value>
           </objProp>
-          <stringProp name="filename">/Users/mohamedlabib/www/thesis/custom-consensus/pbft-hybrid/aggregate.csv</stringProp>
+          <stringProp name="filename">/Users/mohamedlabib/www/thesis/custom-consensus/pbft-sharding/aggregate.csv</stringProp>
         </ResultCollector>
         <hashTree/>
         <ResultCollector guiclass="GraphVisualizer" testclass="ResultCollector" testname="Graph Results" enabled="true">
