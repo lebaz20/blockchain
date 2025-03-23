@@ -185,11 +185,10 @@ class P2pserver {
         switch (data.type) {
           case MESSAGE_TYPE.transaction:
             // check if transactions is valid
-            // TODO: Enable transaction validation
             if (
-              !this.transactionPool.transactionExists(data.transaction) //&&
-              // this.transactionPool.verifyTransaction(data.transaction) &&
-              // this.validators.isValidValidator(data.transaction.from)
+              !this.transactionPool.transactionExists(data.transaction) &&
+              this.transactionPool.verifyTransaction(data.transaction) &&
+              this.validators.isValidValidator(data.transaction.from)
             ) {
               let thresholdReached = this.transactionPool.addTransaction(
                 data.transaction

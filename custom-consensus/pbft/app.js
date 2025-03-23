@@ -48,7 +48,8 @@ app.get("/blocks", (req, res) => {
 
 // creates transactions for the sent data
 app.post("/transaction", (req, res) => {
-  const { data } = req.body;
+  const data = req.body;
+  console.log(`Processing transaction on ${HTTP_PORT}`);
   const transaction = wallet.createTransaction(data);
   p2pserver.broadcastTransaction(transaction);
   res.redirect("/transactions");
