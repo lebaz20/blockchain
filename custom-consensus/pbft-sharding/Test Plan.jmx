@@ -126,6 +126,7 @@
             </value>
           </objProp>
           <stringProp name="filename">/Users/mohamedlabib/www/thesis/custom-consensus/pbft-sharding/summary.csv</stringProp>
+          <boolProp name="useGroupName">true</boolProp>
         </ResultCollector>
         <hashTree/>
         <ResultCollector guiclass="StatVisualizer" testclass="ResultCollector" testname="Aggregate Report">
@@ -163,9 +164,10 @@
             </value>
           </objProp>
           <stringProp name="filename">/Users/mohamedlabib/www/thesis/custom-consensus/pbft-sharding/aggregate.csv</stringProp>
+          <boolProp name="useGroupName">true</boolProp>
         </ResultCollector>
         <hashTree/>
-        <ResultCollector guiclass="GraphVisualizer" testclass="ResultCollector" testname="Graph Results" enabled="true">
+        <ResultCollector guiclass="GraphVisualizer" testclass="ResultCollector" testname="Graph Results">
           <boolProp name="ResultCollector.error_logging">false</boolProp>
           <objProp>
             <name>saveConfig</name>
