@@ -32,7 +32,7 @@ class Blockchain {
     // calculates the next proposer by calculating a random index of the validators list
     // index is calculated using the hash of the latest block
     getProposer() {
-      let index =
+      const index =
         this.chain[this.chain.length - 1].hash[0].charCodeAt(0) % NUMBER_OF_NODES;
       return this.validatorList[index];
     }

@@ -10,6 +10,9 @@ class Transaction {
       this.input = { data: data, timestamp: Date.now() };
       this.hash = ChainUtil.hash(this.input);
       this.signature = wallet.sign(this.hash);
+      // console.log({
+      //   id: this.id, from: this.from, input: this.input, signature: this.signature, hash: this.hash
+      // });
     }
   
     // this method verifies whether the transaction is valid

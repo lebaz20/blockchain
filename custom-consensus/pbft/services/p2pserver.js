@@ -1,5 +1,20 @@
 // import the ws module
 const WebSocket = require("ws");
+const fs = require('fs');
+
+// Create a write stream to your desired log file
+const logStream = fs.createWriteStream('server.log', { flags: 'a' }); // 'a' = append
+
+// Redirect console.log and console.error
+console.log = function (...args) {
+  logStream.write(`[LOG ${new Date().toISOString()}] ${args.join(' ')}\n`);
+  process.stdout.write(`[LOG] ${args.join(' ')}\n`); // Optional: also log to terminal
+};
+
+console.error = function (...args) {
+  logStream.write(`[ERROR ${new Date().toISOString()}] ${args.join(' ')}\n`);
+  process.stderr.write(`[ERROR] ${args.join(' ')}\n`);
+};
 
 // import the min approval constant which will be used to compare the count the messages
 const { MIN_APPROVALS } = require("../config");
@@ -170,10 +185,11 @@ class P2pserver {
         switch (data.type) {
           case MESSAGE_TYPE.transaction:
             // check if transactions is valid
+            // TODO: Enable transaction validation
             if (
-              !this.transactionPool.transactionExists(data.transaction) &&
-              this.transactionPool.verifyTransaction(data.transaction) &&
-              this.validators.isValidValidator(data.transaction.from)
+              !this.transactionPool.transactionExists(data.transaction) //&&
+              // this.transactionPool.verifyTransaction(data.transaction) &&
+              // this.validators.isValidValidator(data.transaction.from)
             ) {
               let thresholdReached = this.transactionPool.addTransaction(
                 data.transaction
@@ -183,7 +199,7 @@ class P2pserver {
   
               // check if limit reached
               if (thresholdReached) {
-                // console.log("THRESHOLD REACHED", P2P_PORT);
+                // console.log("THRESHOLD REACHED, TOTAL NOW:", this.transactionPool.transactions.length, P2P_PORT);
                 // check the current node is the proposer
                 if (this.blockchain.getProposer() == this.wallet.getPublicKey()) {
                 //   console.log("PROPOSING BLOCK", P2P_PORT);
@@ -192,7 +208,7 @@ class P2pserver {
                     this.transactionPool.transactions,
                     this.wallet
                   );
-                //   console.log("CREATED BLOCK", block, P2P_PORT);
+                //   console.log("CREATED BLOCK", { lastHash: block.lastHash, hash: block.hash , data: block.data } , P2P_PORT);
                   this.broadcastPrePrepare(block);
                 }
               } else {
@@ -266,6 +282,7 @@ class P2pserver {
                   this.preparePool,
                   this.commitPool
                 );
+                console.log('NEW BLOCK ADDED TO BLOCK CHAIN, TOTAL NOW:', this.blockchain.chain.length, P2P_PORT);
               }
               // Send a round change message to nodes
               let message = this.messagePool.createMessage(
@@ -294,6 +311,7 @@ class P2pserver {
                 this.messagePool.list[data.message.blockHash] && this.messagePool.list[data.message.blockHash].length >=
                 MIN_APPROVALS
               ) {
+                console.log("TRANSACTION POOL TO BE CLEARED, TOTAL NOW:", this.transactionPool.transactions.length, P2P_PORT);
                 this.transactionPool.clear();
               }
             }
