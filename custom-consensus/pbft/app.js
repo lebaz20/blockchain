@@ -53,6 +53,11 @@ app.get("/total", (req, res) => {
   res.json(total);
 });
 
+// check server health
+app.get("/health", (req, res) => {
+  res.status(200).send('Ok');
+});
+
 // creates transactions for the sent data
 app.post("/transaction", (req, res) => {
   const data = req.body;

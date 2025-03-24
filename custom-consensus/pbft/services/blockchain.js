@@ -15,7 +15,7 @@ class Blockchain {
     // pushes confirmed blocks into the chain
     addBlock(block) {
       this.chain.push(block);
-    //   console.log("NEW BLOCK ADDED TO CHAIN");
+      console.log("NEW BLOCK ADDED TO CHAIN");
       return block;
     }
   
@@ -47,10 +47,10 @@ class Blockchain {
         Block.verifyBlock(block) &&
         Block.verifyProposer(block, this.getProposer())
       ) {
-        // console.log("BLOCK VALID");
+        console.log("BLOCK VALID");
         return true;
       } else {
-        // console.log("BLOCK INVALID");
+        console.log("BLOCK INVALID");
         return false;
       }
     }
@@ -65,6 +65,13 @@ class Blockchain {
       block.prepareMessages = preparePool.getList(hash);
       block.commitMessages = commitPool.getList(hash);
       this.addBlock(block);
+    }
+
+    // checks if the block already exists
+    existingBlock(hash) {
+      return !!this.chain.find(
+        b => b.hash === hash
+      );
     }
 
     // get total number of blocks and transactions

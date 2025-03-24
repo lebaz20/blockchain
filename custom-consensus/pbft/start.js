@@ -1,5 +1,5 @@
 const { spawn } = require("child_process");
-const WebSocket = require("ws");
+const axios = require("axios");
 
 // ulimit -n 1228800
 // sudo sysctl -w kern.maxfiles=1228800
@@ -7,24 +7,21 @@ const WebSocket = require("ws");
 const NUMBER_OF_NODES = 8;
 const TRANSACTION_THRESHOLD = 10;
 
-function waitForWebSocket(url, retryInterval = 1000) {
+function waitForWebServer(url, retryInterval = 1000) {
   return new Promise((resolve) => {
-    function checkWebSocket() {
-      const ws = new WebSocket(url);
-
-      ws.on("open", () => {
-        ws.close();
-        console.log(`WebSocket is open: ${url}`);
-        resolve(true);
-      });
-
-      ws.on("error", () => {
-        console.log(`WebSocket ${url} not available, retrying...`);
-        setTimeout(checkWebSocket, retryInterval + 1000);
-      });
+    function checkWebServer() {
+      axios.get(url + '/health')
+        .then(() => {
+          console.log(`WebServer is open: ${url}`);
+          resolve(true);
+        })
+        .catch(() => {
+          // console.log(`WebServer ${url} not available, retrying...`);
+          setTimeout(checkWebServer, retryInterval + 1000);
+        })
     }
 
-    checkWebSocket();
+    checkWebServer();
   });
 }
 
@@ -52,7 +49,7 @@ for (let index = 0; index < NUMBER_OF_NODES; index++) {
   let promise;
   if (index > 0) {
     const peers = Array.from({ length: index }, (_, i) => `ws://localhost:500${i+1}`);
-    promise = Promise.all(peers.map(peer => waitForWebSocket(peer)));
+    promise = Promise.all(peers.map(peer => waitForWebServer(peer.replace('ws', 'http').replace('500', '300'))));
     envVars.PEERS = peers.join(",");
   }
   

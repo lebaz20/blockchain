@@ -179,7 +179,7 @@ class P2pserver {
         }
         const data = JSON.parse(message);
   
-        // console.log("RECEIVED", data.type, P2P_PORT);
+        console.log("RECEIVED", data.type, P2P_PORT);
   
         // select a particular message handler
         switch (data.type) {
@@ -198,20 +198,20 @@ class P2pserver {
   
               // check if limit reached
               if (thresholdReached) {
-                // console.log("THRESHOLD REACHED, TOTAL NOW:", this.transactionPool.transactions.length, P2P_PORT);
+                console.log("THRESHOLD REACHED, TOTAL NOW:", this.transactionPool.transactions.length, P2P_PORT);
                 // check the current node is the proposer
                 if (this.blockchain.getProposer() == this.wallet.getPublicKey()) {
-                //   console.log("PROPOSING BLOCK", P2P_PORT);
+                  console.log("PROPOSING BLOCK", P2P_PORT);
                   // if the node is the proposer, create a block and broadcast it
                   let block = this.blockchain.createBlock(
                     this.transactionPool.transactions,
                     this.wallet
                   );
-                //   console.log("CREATED BLOCK", { lastHash: block.lastHash, hash: block.hash , data: block.data } , P2P_PORT);
+                  console.log("CREATED BLOCK", { lastHash: block.lastHash, hash: block.hash , data: block.data } , P2P_PORT);
                   this.broadcastPrePrepare(block);
                 }
               } else {
-                // console.log("Transaction Added", P2P_PORT);
+                console.log("Transaction Added", P2P_PORT);
               }
             }
             break;
@@ -273,7 +273,7 @@ class P2pserver {
               // add updated block to chain
               if (
                 this.commitPool.list[data.commit.blockHash].length >=
-                MIN_APPROVALS
+                MIN_APPROVALS && !this.blockchain.existingBlock(data.commit.blockHash)
               ) {
                 this.blockchain.addUpdatedBlock(
                   data.commit.blockHash,
