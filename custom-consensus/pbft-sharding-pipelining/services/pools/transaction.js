@@ -30,14 +30,14 @@ class TransactionPool {
       blockPool.setLatestInflightBlock(block);
     }
 
-    // check if blocks are inflight
-    inflightBlockExists(block = undefined) {
+    // get inflight blocks
+    getInflightBlocks(block = undefined) {
       // unassigned is the only key we have in case no inbound transactions
       let inflightBlocks = Object.keys(this.transactions);
       if (block?.hash) {
         inflightBlocks = inflightBlocks.filter(hash => hash !== block.hash);
       }
-      return inflightBlocks.length > 1;
+      return inflightBlocks;
     }
 
     // returns true if transaction pool is full

@@ -51,7 +51,7 @@ app.get("/blocks", (req, res) => {
 // sends the chain total to the user
 app.get("/total", (req, res) => {
   const total = { total: blockchain.getTotal(), unassignedTransactions: transactionPool.transactions.unassigned.length };
-  console.log(`TOTAL FOR #${SUBSET_INDEX}:`, JSON.stringify(total));
+  console.log(`REQUEST TOTAL FOR #${SUBSET_INDEX}:`, JSON.stringify(total));
   res.json(total);
 });
 

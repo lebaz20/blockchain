@@ -67,8 +67,10 @@ class Blockchain {
           this.addBlock(block);
           return true;
         }
+        console.log(`FAILED TO LOCATE PREVIOUS BLOCK #${block.lastHash}`);
         return false;
       }
+      console.log(`FAILED TO LOCATE BLOCK #${hash}`);
       return false;
     }
 
@@ -81,16 +83,16 @@ class Blockchain {
 
     waitUntilAvailableBlock(item, existingCheck) {
       return new Promise((resolve) => {
-          function recExistingCheck(retryInterval = 1000, retrialCount = 1) {
+          function recExistingCheck(retryInterval, retrialCount) {
             if (existingCheck(item)) {
               resolve(true);
-            } else if (retrialCount <= 20) {
+            } else if (retrialCount <= 50) {
               setTimeout(() => recExistingCheck(retryInterval + 1000, retryInterval + 1), retryInterval + 1000);
             } else {
               resolve(false);
             }
           }
-          recExistingCheck();
+          recExistingCheck(1000, 1);
       });
     }
 

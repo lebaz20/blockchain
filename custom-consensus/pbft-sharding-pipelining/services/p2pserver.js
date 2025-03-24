@@ -179,7 +179,7 @@ class P2pserver {
     // handles any message sent to the current node
     messageHandler(socket) {
       // registers message handler
-      socket.on("message", message => {
+      socket.on("message", async message => {
         if (Buffer.isBuffer(message)) {
           message = message.toString(); // Convert Buffer to string
         }
@@ -207,10 +207,10 @@ class P2pserver {
               if (thresholdReached) {
                 console.log("THRESHOLD REACHED, TOTAL NOW:", this.transactionPool.transactions.unassigned.length, P2P_PORT);
                 // check the current node is the proposer
-                if (this.blockchain.getProposer() == this.wallet.getPublicKey()) {
+                if (this.blockchain.getProposer() == this.wallet.getPublicKey() && this.transactionPool.getInflightBlocks().length <= 2) {
                   console.log("PROPOSING BLOCK", P2P_PORT);
                   // if the node is the proposer, create a block and broadcast it
-                  const previousBlock = this.transactionPool.inflightBlockExists() ? this.blockPool.latestInflightBlock : undefined;
+                  const previousBlock = this.transactionPool.getInflightBlocks().length > 1 ? this.blockPool.latestInflightBlock : undefined;
                   const block = this.blockchain.createBlock(
                     this.transactionPool.transactions.unassigned,
                     this.wallet,
@@ -292,19 +292,19 @@ class P2pserver {
                 this.commitPool.list[data.commit.blockHash].length >=
                 MIN_APPROVALS && !this.blockchain.existingBlock(data.commit.blockHash)
               ) {
-                const result = this.blockchain.addUpdatedBlock(
+                const result = await this.blockchain.addUpdatedBlock(
                   data.commit.blockHash,
                   this.blockPool,
                   this.preparePool,
                   this.commitPool
                 );
                 if (result) {
-                  console.log('NEW BLOCK ADDED TO BLOCK CHAIN, TOTAL NOW:', this.blockchain.chain.length, P2P_PORT);
+                  console.log('NEW BLOCK ADDED TO BLOCK CHAIN, TOTAL NOW:', this.blockchain.chain.length, data.commit.blockHash, P2P_PORT);
                 } else {
                   console.log('NEW BLOCK FAILED TO ADD TO BLOCK CHAIN, TOTAL STILL:', this.blockchain.chain.length, P2P_PORT);
                 }
                 const total = { total: this.blockchain.getTotal(), unassignedTransactions: this.transactionPool.transactions.unassigned.length };
-                console.log(`TOTAL FOR #${SUBSET_INDEX}:`, JSON.stringify(total));
+                console.log(`P2P TOTAL FOR #${SUBSET_INDEX}:`, JSON.stringify(total));
               }
               // Send a round change message to nodes
               let message = this.messagePool.createMessage(
