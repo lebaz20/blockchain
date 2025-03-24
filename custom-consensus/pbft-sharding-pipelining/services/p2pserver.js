@@ -108,18 +108,19 @@ class P2pserver {
     }
   
     // broadcasts preprepare
-    broadcastPrePrepare(block) {
+    broadcastPrePrepare(block, previousBlock = undefined) {
       this.sockets.forEach(socket => {
-        this.sendPrePrepare(socket, block);
+        this.sendPrePrepare(socket, block, previousBlock);
       });
     }
   
     // sends preprepare to a particular socket
-    sendPrePrepare(socket, block) {
+    sendPrePrepare(socket, block, previousBlock = undefined) {
       socket.send(
         JSON.stringify({
           type: MESSAGE_TYPE.pre_prepare,
-          block: block
+          block,
+          previousBlock
         })
       );
     }
@@ -209,17 +210,18 @@ class P2pserver {
                 if (this.blockchain.getProposer() == this.wallet.getPublicKey()) {
                   console.log("PROPOSING BLOCK", P2P_PORT);
                   // if the node is the proposer, create a block and broadcast it
-                  let block = this.blockchain.createBlock(
+                  const previousBlock = this.transactionPool.inflightBlockExists() ? this.blockPool.latestInflightBlock : undefined;
+                  const block = this.blockchain.createBlock(
                     this.transactionPool.transactions.unassigned,
                     this.wallet,
-                    this.transactionPool.inflightBlockExists() ? this.blockPool.latestInflightBlock : undefined
+                    previousBlock
                   );
                   console.log("CREATED BLOCK", { lastHash: block.lastHash, hash: block.hash , data: block.data } , P2P_PORT);
                   // assign block transactions to the block
                   // TODO: release assignment after x time in case block creation doesn't succeed
                   this.transactionPool.assignTransactions(block, this.blockPool);
 
-                  this.broadcastPrePrepare(block);
+                  this.broadcastPrePrepare(block, previousBlock);
                 }
               } else {
                 console.log("Transaction Added", P2P_PORT);
@@ -230,7 +232,7 @@ class P2pserver {
             // check if block is valid
             if (
               !this.blockPool.existingBlock(data.block) &&
-              this.blockchain.isValidBlock(data.block, this.transactionPool.inflightBlockExists(data.block) ? this.blockPool.latestInflightBlock : undefined)
+              this.blockchain.isValidBlock(data.block, data.previousBlock)
             ) {
               // add block to pool
               this.blockPool.addBlock(data.block);
@@ -240,7 +242,7 @@ class P2pserver {
               this.transactionPool.assignTransactions(data.block, this.blockPool);
   
               // send to other nodes
-              this.broadcastPrePrepare(data.block);
+              this.broadcastPrePrepare(data.block, data.previousBlock);
   
               // create and broadcast a prepare message
               let prepare = this.preparePool.prepare(data.block, this.wallet);
@@ -290,13 +292,17 @@ class P2pserver {
                 this.commitPool.list[data.commit.blockHash].length >=
                 MIN_APPROVALS && !this.blockchain.existingBlock(data.commit.blockHash)
               ) {
-                this.blockchain.addUpdatedBlock(
+                const result = this.blockchain.addUpdatedBlock(
                   data.commit.blockHash,
                   this.blockPool,
                   this.preparePool,
                   this.commitPool
                 );
-                console.log('NEW BLOCK ADDED TO BLOCK CHAIN, TOTAL NOW:', this.blockchain.chain.length, P2P_PORT);
+                if (result) {
+                  console.log('NEW BLOCK ADDED TO BLOCK CHAIN, TOTAL NOW:', this.blockchain.chain.length, P2P_PORT);
+                } else {
+                  console.log('NEW BLOCK FAILED TO ADD TO BLOCK CHAIN, TOTAL STILL:', this.blockchain.chain.length, P2P_PORT);
+                }
                 const total = { total: this.blockchain.getTotal(), unassignedTransactions: this.transactionPool.transactions.unassigned.length };
                 console.log(`TOTAL FOR #${SUBSET_INDEX}:`, JSON.stringify(total));
               }

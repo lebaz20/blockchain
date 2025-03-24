@@ -10,6 +10,9 @@ class BlockPool {
     existingBlock(block) {
       return !!this.blocks?.find(b => b.hash === block.hash);
     }
+    existingBlockByHash(hash) {
+      return !!this.blocks?.find(b => b.hash === hash);
+    }
   
     // pushes block to the chain
     addBlock(block) {
