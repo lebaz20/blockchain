@@ -211,12 +211,13 @@ class P2pserver {
                   // if the node is the proposer, create a block and broadcast it
                   let block = this.blockchain.createBlock(
                     this.transactionPool.transactions.unassigned,
-                    this.wallet
+                    this.wallet,
+                    this.transactionPool.inflightBlockExists() ? this.blockPool.latestInflightBlock : undefined
                   );
                   console.log("CREATED BLOCK", { lastHash: block.lastHash, hash: block.hash , data: block.data } , P2P_PORT);
                   // assign block transactions to the block
                   // TODO: release assignment after x time in case block creation doesn't succeed
-                  this.transactionPool.assignTransactions(block);
+                  this.transactionPool.assignTransactions(block, this.blockPool);
 
                   this.broadcastPrePrepare(block);
                 }
@@ -229,14 +230,14 @@ class P2pserver {
             // check if block is valid
             if (
               !this.blockPool.existingBlock(data.block) &&
-              this.blockchain.isValidBlock(data.block)
+              this.blockchain.isValidBlock(data.block, this.transactionPool.inflightBlockExists(data.block) ? this.blockPool.latestInflightBlock : undefined)
             ) {
               // add block to pool
               this.blockPool.addBlock(data.block);
 
               // assign block transactions to the block
               // TODO: release assignment after x time in case block creation doesn't succeed
-              this.transactionPool.assignTransactions(data.block);
+              this.transactionPool.assignTransactions(data.block, this.blockPool);
   
               // send to other nodes
               this.broadcastPrePrepare(data.block);

@@ -20,9 +20,9 @@ class Blockchain {
     }
   
     // wrapper function to create blocks
-    createBlock(transactions, wallet) {
+    createBlock(transactions, wallet, previousBlock = undefined) {
       const block = Block.createBlock(
-        this.chain[this.chain.length - 1],
+        previousBlock ?? this.chain[this.chain.length - 1],
         transactions,
         wallet
       );
@@ -38,8 +38,8 @@ class Blockchain {
     }
   
     // checks if the received block is valid
-    isValidBlock(block) {
-      const lastBlock = this.chain[this.chain.length - 1];
+    isValidBlock(block, previousBlock = undefined) {
+      const lastBlock = previousBlock ?? this.chain[this.chain.length - 1];
       if (
         lastBlock.sequenceNo + 1 == block.sequenceNo &&
         block.lastHash === lastBlock.hash &&
@@ -65,6 +65,14 @@ class Blockchain {
       block.prepareMessages = preparePool.getList(hash);
       block.commitMessages = commitPool.getList(hash);
       this.addBlock(block);
+    }
+
+    // get total number of blocks and transactions
+    getTotal() {
+      return {
+        blocks: this.chain.length,
+        transactions: this.chain.reduce((sum, block) => sum + block.data.length, 0)
+      }
     }
   }
   module.exports = Blockchain;

@@ -10,9 +10,13 @@ const ACTIVE_SUBSET_OF_NODES = process.env.ACTIVE_SUBSET_OF_NODES ||  0.5;
 // Minimum number of positive votes required for the message/block to be valid
 const MIN_APPROVALS = 2 * (NUMBER_OF_NODES / 3) + 1;
 
+// SUBSET INDEX
+const SUBSET_INDEX = process.env.SUBSET_INDEX ?? 'SUBSET1';
+
 module.exports = {
   TRANSACTION_THRESHOLD,
   NUMBER_OF_NODES,
   ACTIVE_SUBSET_OF_NODES,
-  MIN_APPROVALS
+  MIN_APPROVALS,
+  SUBSET_INDEX
 };

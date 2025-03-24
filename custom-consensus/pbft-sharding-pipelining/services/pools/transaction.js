@@ -8,6 +8,7 @@ const { TRANSACTION_THRESHOLD } = require("../../config");
 class TransactionPool {
     constructor() {
       this.transactions = { unassigned: [] };
+      this.latestInflightBlock = undefined;
     }
   
     // pushes transactions in the list
@@ -18,12 +19,25 @@ class TransactionPool {
       return this.poolFull();
     }
   
-    assignTransactions(block) {
+    // assign block transactions to the block via block hash
+    // TODO: release assignment after x time in case block creation doesn't succeed
+    assignTransactions(block, blockPool) {
       const assignedTransactions = block.data;
       const removeIds = new Set(assignedTransactions.map(item => item.id));
       this.transactions.unassigned = this.transactions.unassigned.filter(item => !removeIds.has(item.id));
       const hash = block.hash;
       this.transactions[hash] = assignedTransactions;
+      blockPool.setLatestInflightBlock(block);
+    }
+
+    // check if blocks are inflight
+    inflightBlockExists(block = undefined) {
+      // unassigned is the only key we have in case no inbound transactions
+      let inflightBlocks = Object.keys(this.transactions);
+      if (block?.hash) {
+        inflightBlocks = inflightBlocks.filter(hash => hash !== block.hash);
+      }
+      return inflightBlocks.length > 1;
     }
 
     // returns true if transaction pool is full
