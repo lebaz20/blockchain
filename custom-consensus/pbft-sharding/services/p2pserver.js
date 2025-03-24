@@ -18,7 +18,7 @@ console.error = function (...args) {
 
 // import the min approval constant which will be used to compare the count the messages
 // import active subset of nodes to use in validation
-const { MIN_APPROVALS } = require("../config");
+const { MIN_APPROVALS, SUBSET_INDEX } = require("../config");
 
 // declare a p2p server port on which it would listen for messages
 // we will pass the port through command line
@@ -288,6 +288,8 @@ class P2pserver {
                   this.commitPool
                 );
                 console.log('NEW BLOCK ADDED TO BLOCK CHAIN, TOTAL NOW:', this.blockchain.chain.length, P2P_PORT);
+                const total = { total: this.blockchain.getTotal(), unassignedTransactions: this.transactionPool.transactions.unassigned.length };
+                console.log(`TOTAL FOR #${SUBSET_INDEX}:`, JSON.stringify(total));
               }
               // Send a round change message to nodes
               let message = this.messagePool.createMessage(
