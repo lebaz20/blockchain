@@ -3,19 +3,19 @@ const Wallet = require("./wallet");
 
 class Validators {
   // constructor will take an argument which is the number of nodes in the network
-  constructor(numberOfValidators) {
-    this.list = this.generateAddresses(numberOfValidators);
+  constructor(nodesSubset) {
+    this.list = this.generateAddresses(nodesSubset);
   }
 
   // This function generates wallets and their public key
   // The secret key has been known for demonstration purposes
   // Secret will be passed from command line to generate the same wallet again
   // As a result the same public key will be generated
-  generateAddresses(numberOfValidators) {
+  generateAddresses(nodesSubset) {
     let list = [];
-    for (let i = 0; i < numberOfValidators; i++) {
-      list.push(new Wallet("NODE" + i).getPublicKey());
-    }
+    nodesSubset.forEach(node => {
+      list.push(new Wallet("NODE" + node).getPublicKey());
+    });
     return list;
   }
 

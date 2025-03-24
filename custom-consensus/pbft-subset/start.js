@@ -56,7 +56,8 @@ for (let index = 0; index < NUMBER_OF_NODES; index++) {
     P2P_PORT: 5001 + index,
     HTTP_PORT: 3001 + index,
     TRANSACTION_THRESHOLD,
-    NUMBER_OF_NODES,
+    NUMBER_OF_NODES: Math.floor(ACTIVE_SUBSET_OF_NODES * NUMBER_OF_NODES),
+    NODES_SUBSET: JSON.stringify(nodesSubset)
   };
 
   let promise;
