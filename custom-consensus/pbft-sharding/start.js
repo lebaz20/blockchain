@@ -6,7 +6,7 @@ const axios = require("axios");
 // sudo sysctl -w kern.maxfilesperproc=614400
 const NUMBER_OF_NODES = 8;
 const TRANSACTION_THRESHOLD = 10;
-const ACTIVE_SUBSET_OF_NODES = 0.5;
+const ACTIVE_SUBSET_OF_NODES = 4;
 
 // phase 1 -> [DONE]: Use subset of validators all the time
 // phase 2 -> Track faulty nodes and do not use them later
@@ -82,7 +82,8 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
       P2P_PORT: 5001 + index,
       HTTP_PORT: 3001 + index,
       TRANSACTION_THRESHOLD,
-      NUMBER_OF_NODES,
+      NUMBER_OF_NODES: ACTIVE_SUBSET_OF_NODES,
+      NODES_SUBSET: JSON.stringify(nodesSubset),
       SUBSET_INDEX: `SUBSET${subsetIndex + 1}`
     };
 

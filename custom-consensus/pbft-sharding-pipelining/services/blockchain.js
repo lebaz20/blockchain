@@ -1,5 +1,5 @@
 // Import total number of nodes used to create validators list
-const { NUMBER_OF_NODES } = require("../config");
+const { NODES_SUBSET, NUMBER_OF_NODES } = require("../config");
 
 // Used to verify block
 const Block = require("./block");
@@ -8,7 +8,7 @@ class Blockchain {
     // the constructor takes an argument validators class object
     // this is used to create a list of validators
     constructor(validators) {
-      this.validatorList = validators.generateAddresses(NUMBER_OF_NODES);
+      this.validatorList = validators.generateAddresses(NODES_SUBSET);
       this.chain = [Block.genesis()];
     }
   

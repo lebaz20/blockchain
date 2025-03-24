@@ -13,9 +13,9 @@ class Validators {
   // As a result the same public key will be generated
   generateAddresses(numberOfValidators) {
     let list = [];
-    for (let i = 0; i < numberOfValidators; i++) {
-      list.push(new Wallet("NODE" + i).getPublicKey());
-    }
+    numberOfValidators.forEach(node => {
+      list.push(new Wallet("NODE" + node).getPublicKey());
+    });
     return list;
   }
 

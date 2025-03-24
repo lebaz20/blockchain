@@ -2,7 +2,7 @@
 const express = require("express");
 const axios = require('axios');
 const bodyParser = require("body-parser");
-const { NUMBER_OF_NODES, SUBSET_INDEX } = require("./config");
+const { NODES_SUBSET, SUBSET_INDEX } = require("./config");
 const Wallet = require("./services/wallet");
 const P2pserver = require("./services/p2pserver");
 const Validators = require("./services/validators");
@@ -21,7 +21,7 @@ app.use(bodyParser.json());
 
 const wallet = new Wallet(process.env.SECRET);
 const transactionPool = new TransactionPool();
-const validators = new Validators(NUMBER_OF_NODES);
+const validators = new Validators(NODES_SUBSET);
 const blockchain = new Blockchain(validators);
 const blockPool = new BlockPool();
 const preparePool = new PreparePool();

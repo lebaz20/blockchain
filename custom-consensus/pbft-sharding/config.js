@@ -3,6 +3,7 @@ const TRANSACTION_THRESHOLD = process.env.TRANSACTION_THRESHOLD ? parseInt(proce
 
 // total number of nodes in the network
 const NUMBER_OF_NODES = process.env.NUMBER_OF_NODES ? parseInt(process.env.NUMBER_OF_NODES, 10) : 3;
+const NODES_SUBSET = process.env.NODES_SUBSET ? JSON.parse(process.env.NODES_SUBSET) : [];
 
 // improve performance by using a subset of nodes in the network
 const ACTIVE_SUBSET_OF_NODES = process.env.ACTIVE_SUBSET_OF_NODES ||  0.5;
@@ -18,5 +19,6 @@ module.exports = {
   NUMBER_OF_NODES,
   ACTIVE_SUBSET_OF_NODES,
   MIN_APPROVALS,
-  SUBSET_INDEX
+  SUBSET_INDEX,
+  NODES_SUBSET
 };
