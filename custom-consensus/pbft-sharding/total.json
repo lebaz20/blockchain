@@ -12,5 +12,10 @@
             "transactions":734
             },
             "unassignedTransactions": 5
-        }
+        },
+    "total": {
+        "blocks": 851,
+        "transactions": 36892
+        },
+        "unassignedTransactions": 5
 }
