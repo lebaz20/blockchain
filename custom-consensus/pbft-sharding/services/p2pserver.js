@@ -288,7 +288,7 @@ class P2pserver {
                   this.commitPool
                 );
                 console.log('NEW BLOCK ADDED TO BLOCK CHAIN, TOTAL NOW:', this.blockchain.chain.length, P2P_PORT);
-                const total = { total: this.blockchain.getTotal(), unassignedTransactions: this.transactionPool.transactions.unassigned.length };
+                const total = { total: this.blockchain.getTotal(), unassignedTransactions: this.transactionPool.transactions.length };
                 console.log(`TOTAL FOR #${SUBSET_INDEX}:`, JSON.stringify(total));
               }
               // Send a round change message to nodes

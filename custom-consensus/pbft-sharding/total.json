@@ -1,0 +1,16 @@
+{
+    "SUBSET1": {
+        "total": {
+            "blocks": 779,
+            "transactions": 36158
+            },
+            "unassignedTransactions": 0
+        },
+    "SUBSET2": {
+        "total": {
+            "blocks": 72,
+            "transactions":734
+            },
+            "unassignedTransactions": 5
+        }
+}
