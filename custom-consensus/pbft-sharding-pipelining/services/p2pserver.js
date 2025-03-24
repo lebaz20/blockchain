@@ -288,7 +288,7 @@ class P2pserver {
               // add updated block to chain
               if (
                 this.commitPool.list[data.commit.blockHash].length >=
-                MIN_APPROVALS
+                MIN_APPROVALS && !this.blockchain.existingBlock(data.commit.blockHash)
               ) {
                 this.blockchain.addUpdatedBlock(
                   data.commit.blockHash,

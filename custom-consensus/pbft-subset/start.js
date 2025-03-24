@@ -71,7 +71,7 @@ for (let index = 0; index < NUMBER_OF_NODES; index++) {
     });
     if (peersSubset.length > 0 && nodesSubset.includes(index)) {
       console.log(`Peers for ${5001 + index}: `, peersSubset);
-      promise = Promise.all(peersSubset.map(peer => waitForWebServer(peer.replace('ws', 'http').replace('5', '3'))));
+      promise = Promise.all(peersSubset.map(peer => waitForWebServer(peer.replace('ws', 'http').replace('500', '300'))));
       envVars.PEERS = peersSubset.join(",");
     }
   }

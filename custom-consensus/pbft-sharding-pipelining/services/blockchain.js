@@ -67,6 +67,13 @@ class Blockchain {
       this.addBlock(block);
     }
 
+    // checks if the block already exists
+    existingBlock(hash) {
+      return !!this.chain.find(
+        b => b.hash === hash
+      );
+    }
+
     // get total number of blocks and transactions
     getTotal() {
       return {
