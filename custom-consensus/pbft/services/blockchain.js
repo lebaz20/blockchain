@@ -66,5 +66,13 @@ class Blockchain {
       block.commitMessages = commitPool.getList(hash);
       this.addBlock(block);
     }
+
+    // get total number of blocks and transactions
+    getTotal() {
+      return {
+        blocks: this.chain.length,
+        transactions: this.chain.reduce((sum, block) => sum + block.data.length, 0)
+      }
+    }
   }
   module.exports = Blockchain;

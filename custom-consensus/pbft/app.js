@@ -46,13 +46,20 @@ app.get("/blocks", (req, res) => {
   res.json(blockchain.chain);
 });
 
+// sends the chain total to the user
+app.get("/total", (req, res) => {
+  const total = { total: blockchain.getTotal(), unassignedTransactions: transactionPool.transactions.length };
+  console.log(`TOTAL:`, JSON.stringify(total));
+  res.json(total);
+});
+
 // creates transactions for the sent data
 app.post("/transaction", (req, res) => {
   const data = req.body;
   console.log(`Processing transaction on ${HTTP_PORT}`);
   const transaction = wallet.createTransaction(data);
   p2pserver.broadcastTransaction(transaction);
-  res.redirect("/transactions");
+  res.redirect("/total");
 });
 
 // starts the app server

@@ -73,7 +73,7 @@ function initServer(env) {
 
 console.log(getRandomIndicesArrays(Array.from({ length: NUMBER_OF_NODES }, (_, i) => i)))
 const nodesSubsets = getRandomIndicesArrays(Array.from({ length: NUMBER_OF_NODES }, (_, i) => i));
-nodesSubsets.forEach(nodesSubset => {
+nodesSubsets.forEach((nodesSubset, subsetIndex) => {
   console.log('Subset PBFT nodes:', nodesSubset.map(i => "500" + (parseInt(i, 10) + 1)));
   for (let index = 0; index < NUMBER_OF_NODES; index++) {
     const envVars = {
@@ -83,6 +83,7 @@ nodesSubsets.forEach(nodesSubset => {
       HTTP_PORT: 3001 + index,
       TRANSACTION_THRESHOLD,
       NUMBER_OF_NODES,
+      SUBSET_INDEX: `SUBSET${subsetIndex + 1}`
     };
 
     let promise;

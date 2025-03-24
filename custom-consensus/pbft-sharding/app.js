@@ -2,7 +2,7 @@
 const express = require("express");
 const axios = require('axios');
 const bodyParser = require("body-parser");
-const { NUMBER_OF_NODES } = require("./config");
+const { NUMBER_OF_NODES, SUBSET_INDEX } = require("./config");
 const Wallet = require("./services/wallet");
 const P2pserver = require("./services/p2pserver");
 const Validators = require("./services/validators");
@@ -48,6 +48,13 @@ app.get("/blocks", (req, res) => {
   res.json(blockchain.chain);
 });
 
+// sends the chain total to the user
+app.get("/total", (req, res) => {
+  const total = { total: blockchain.getTotal(), unassignedTransactions: transactionPool.transactions.length };
+  console.log(`TOTAL FOR #${SUBSET_INDEX}:`, JSON.stringify(total));
+  res.json(total);
+});
+
 // check server health
 app.get("/health", (req, res) => {
   res.status(200).send('Ok');
@@ -74,7 +81,7 @@ app.post("/transaction", async (req, res) => {
     console.log(`Processing transaction on ${HTTP_PORT}`);
     const transaction = wallet.createTransaction(data);
     p2pserver.broadcastTransaction(transaction);
-    res.redirect("/transactions");
+    res.redirect("/total");
   }
 });
 
