@@ -93,7 +93,6 @@ class P2pserver {
     // broadcasts transactions
     broadcastTransaction(transaction) {
       this.sockets.forEach(socket => {
-        console.log("broadcastTransaction", P2P_PORT, this.sockets.length);
         this.sendTransaction(socket, transaction);
       });
     }
@@ -199,21 +198,26 @@ class P2pserver {
               let thresholdReached = this.transactionPool.addTransaction(
                 data.transaction
               );
+              console.log("TRANSACTION ADDED, TOTAL NOW:", this.transactionPool.transactions.unassigned.length, P2P_PORT);
               // send transactions to other nodes
               this.broadcastTransaction(data.transaction);
   
               // check if limit reached
               if (thresholdReached) {
-                console.log("THRESHOLD REACHED, TOTAL NOW:", this.transactionPool.transactions.length, P2P_PORT);
+                console.log("THRESHOLD REACHED, TOTAL NOW:", this.transactionPool.transactions.unassigned.length, P2P_PORT);
                 // check the current node is the proposer
                 if (this.blockchain.getProposer() == this.wallet.getPublicKey()) {
                   console.log("PROPOSING BLOCK", P2P_PORT);
                   // if the node is the proposer, create a block and broadcast it
                   let block = this.blockchain.createBlock(
-                    this.transactionPool.transactions,
+                    this.transactionPool.transactions.unassigned,
                     this.wallet
                   );
                   console.log("CREATED BLOCK", { lastHash: block.lastHash, hash: block.hash , data: block.data } , P2P_PORT);
+                  // assign block transactions to the block
+                  // TODO: release assignment after x time in case block creation doesn't succeed
+                  this.transactionPool.assignTransactions(block);
+
                   this.broadcastPrePrepare(block);
                 }
               } else {
@@ -229,6 +233,10 @@ class P2pserver {
             ) {
               // add block to pool
               this.blockPool.addBlock(data.block);
+
+              // assign block transactions to the block
+              // TODO: release assignment after x time in case block creation doesn't succeed
+              this.transactionPool.assignTransactions(data.block);
   
               // send to other nodes
               this.broadcastPrePrepare(data.block);
@@ -316,8 +324,8 @@ class P2pserver {
                 this.messagePool.list[data.message.blockHash] && this.messagePool.list[data.message.blockHash].length >=
                 MIN_APPROVALS
               ) {
-                console.log("TRANSACTION POOL TO BE CLEARED, TOTAL NOW:", this.transactionPool.transactions.length, P2P_PORT);
-                this.transactionPool.clear();
+                console.log("TRANSACTION POOL TO BE CLEARED, TOTAL NOW:", this.transactionPool.transactions[data.message.blockHash]?.length, P2P_PORT);
+                this.transactionPool.clear(data.message.blockHash);
               }
             }
             break;
