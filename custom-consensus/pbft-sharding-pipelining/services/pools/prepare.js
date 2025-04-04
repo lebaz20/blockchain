@@ -38,6 +38,12 @@ class PreparePool {
         p => p.publicKey === prepare.publicKey
       );
     }
+
+    // checks if the block already exists
+    isBlockPrepared(block, wallet) {
+      const prepare = this.createPrepare(block, wallet);
+      return this.existingPrepare(prepare);
+    }
   
     getList(hash) {
       return this.list[hash];

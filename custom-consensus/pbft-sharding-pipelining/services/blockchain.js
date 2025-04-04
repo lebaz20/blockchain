@@ -31,25 +31,29 @@ class Blockchain {
   
     // calculates the next proposer by calculating a random index of the validators list
     // index is calculated using the hash of the latest block
-    getProposer() {
+    getProposer(blocksCount = undefined) {
       const index =
-        this.chain[this.chain.length - 1].hash[0].charCodeAt(0) % NUMBER_OF_NODES;
+        this.chain[(blocksCount ?? this.chain.length) - 1].hash[0].charCodeAt(0) % NUMBER_OF_NODES;
       return this.validatorList[index];
     }
   
     // checks if the received block is valid
-    isValidBlock(block, previousBlock = undefined) {
+    isValidBlock(block, blocksCount, previousBlock = undefined) {
       const lastBlock = previousBlock ?? this.chain[this.chain.length - 1];
       if (
         lastBlock.sequenceNo + 1 == block.sequenceNo &&
         block.lastHash === lastBlock.hash &&
         block.hash === Block.blockHash(block) &&
         Block.verifyBlock(block) &&
-        Block.verifyProposer(block, this.getProposer())
+        Block.verifyProposer(block, this.getProposer(blocksCount))
       ) {
         console.log("BLOCK VALID");
         return true;
       } else {
+        console.log(previousBlock, lastBlock, lastBlock.sequenceNo + 1 == block.sequenceNo ,block.lastHash === lastBlock.hash ,
+          block.hash === Block.blockHash(block) ,
+          Block.verifyBlock(block) ,
+          Block.verifyProposer(block, this.getProposer(blocksCount)))
         console.log("BLOCK INVALID");
         return false;
       }
