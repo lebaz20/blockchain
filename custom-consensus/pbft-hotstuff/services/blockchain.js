@@ -32,8 +32,9 @@ class Blockchain {
     // calculates the next proposer by calculating a random index of the validators list
     // index is calculated using the hash of the latest block
     getProposer(blocksCount = undefined) {
-      const index =
-        this.chain[(blocksCount ?? this.chain.length) - 1].hash[0].charCodeAt(0) % NUMBER_OF_NODES;
+      // const index = this.chain[(blocksCount ?? this.chain.length) - 1].hash[0].charCodeAt(0) % NUMBER_OF_NODES;
+      // TODO: Rotate leadership
+      const index = 0;
       return this.validatorList[index];
     }
   
@@ -69,7 +70,7 @@ class Blockchain {
           block.prepareMessages = preparePool.getList(hash);
           block.commitMessages = commitPool.getList(hash);
           this.addBlock(block);
-          return true;
+          return block;
         }
         console.log(`FAILED TO LOCATE PREVIOUS BLOCK #${block.lastHash}`);
         return false;

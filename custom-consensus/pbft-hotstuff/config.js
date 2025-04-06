@@ -14,11 +14,16 @@ const MIN_APPROVALS = 2 * (NUMBER_OF_NODES / 3) + 1;
 // SUBSET INDEX
 const SUBSET_INDEX = process.env.SUBSET_INDEX ?? 'SUBSET1';
 
+// IS_LEADER 
+// TODO: Rotate leadership among all nodes
+const IS_LEADER = process.env.IS_LEADER === 'true';
+
 module.exports = {
   TRANSACTION_THRESHOLD,
   NUMBER_OF_NODES,
   ACTIVE_SUBSET_OF_NODES,
   MIN_APPROVALS,
   SUBSET_INDEX,
-  NODES_SUBSET
+  NODES_SUBSET,
+  IS_LEADER
 };

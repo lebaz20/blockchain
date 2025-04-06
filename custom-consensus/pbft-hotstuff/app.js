@@ -80,7 +80,7 @@ app.post("/transaction", async (req, res) => {
     const data = req.body;
     console.log(`Processing transaction on ${HTTP_PORT}`);
     const transaction = wallet.createTransaction(data);
-    p2pserver.broadcastTransaction(transaction);
+    p2pserver.processTransaction(transaction);
     res.redirect("/total");
   }
 });
