@@ -4,7 +4,7 @@ const axios = require("axios");
 // ulimit -n 1228800
 // sudo sysctl -w kern.maxfiles=1228800
 // sudo sysctl -w kern.maxfilesperproc=614400
-const NUMBER_OF_NODES = 12;
+const NUMBER_OF_NODES = 256;
 const TRANSACTION_THRESHOLD = 400;
 const ACTIVE_SUBSET_OF_NODES = 4;
 
