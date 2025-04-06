@@ -4,8 +4,8 @@ const axios = require("axios");
 // ulimit -n 1228800
 // sudo sysctl -w kern.maxfiles=1228800
 // sudo sysctl -w kern.maxfilesperproc=614400
-const NUMBER_OF_NODES = 8;
-const TRANSACTION_THRESHOLD = 10;
+const NUMBER_OF_NODES = 12;
+const TRANSACTION_THRESHOLD = 400;
 const ACTIVE_SUBSET_OF_NODES = 4;
 
 // phase 1 -> [DONE]: Use subset of validators all the time
