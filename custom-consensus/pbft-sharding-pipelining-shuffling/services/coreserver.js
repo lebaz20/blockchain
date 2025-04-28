@@ -61,7 +61,7 @@ class Coreserver {
         type: MESSAGE_TYPE.block_from_core,
         block,
         subsetIndex,
-      })
+      }),
     );
   }
 
@@ -85,7 +85,7 @@ class Coreserver {
           ) {
             const result = this.blockchain.addBlock(
               data.block,
-              data.subsetIndex
+              data.subsetIndex,
             );
             const total = { total: this.blockchain.getTotal(isCore) };
             console.log(`CORE TOTAL:`, JSON.stringify(total));
@@ -94,6 +94,35 @@ class Coreserver {
           break;
       }
     });
+  }
+
+  shuffleArray(arr) {
+    const copy = arr.slice(); // don't modify original
+    for (let i = copy.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [copy[i], copy[j]] = [copy[j], copy[i]]; // swap
+    }
+    return copy;
+  }
+
+  splitIntoFoursWithRemaining(arr) {
+    const result = [];
+    let i = 0;
+
+    while (arr.length - i >= 4) {
+      result.push(arr.slice(i, i + 4));
+      i += 4;
+    }
+
+    // Last group with remaining 4 or more
+    result[result.length - 1] = [...result[result.length - 1], ...arr.slice(i)];
+
+    return result;
+  }
+
+  getRandomIndicesArrays(array) {
+    const indices = Array.from({ length: array.length }, (_, i) => i);
+    return this.splitIntoFoursWithRemaining(this.shuffleArray(indices));
   }
 }
 

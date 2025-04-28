@@ -37,7 +37,7 @@ const p2pserver = new P2pserver(
   preparePool,
   commitPool,
   messagePool,
-  validators
+  validators,
 );
 
 // sends all transactions in the transaction pool to the user

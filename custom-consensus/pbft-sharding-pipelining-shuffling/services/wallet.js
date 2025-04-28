@@ -4,33 +4,33 @@ const ChainUtil = require("../utils/chain");
 const Transaction = require("./transaction");
 
 class Wallet {
-    // The secret phrase is passed as an argument when creating a wallet
-    // The key-pair generated for a secret phrase is always the same
-    constructor(secret) {
-      this.keyPair = ChainUtil.genKeyPair(secret);
-      this.publicKey = this.keyPair.getPublic("hex");
-    }
-  
-    // Used for printing the wallet details
-    toString() {
-      return `Wallet - 
-              publicKey: ${this.publicKey.toString()}`;
-    }
-  
-    // Used for signing data hashes
-    sign(dataHash) {
-      return this.keyPair.sign(dataHash).toHex();
-    }
-  
-    // Creates and returns transactions
-    createTransaction(data) {
-      return new Transaction(data, this);
-    }
-  
-    // Return public key
-    getPublicKey() {
-      return this.publicKey;
-    }
+  // The secret phrase is passed as an argument when creating a wallet
+  // The key-pair generated for a secret phrase is always the same
+  constructor(secret) {
+    this.keyPair = ChainUtil.genKeyPair(secret);
+    this.publicKey = this.keyPair.getPublic("hex");
   }
-  
-  module.exports = Wallet;
+
+  // Used for printing the wallet details
+  toString() {
+    return `Wallet - 
+              publicKey: ${this.publicKey.toString()}`;
+  }
+
+  // Used for signing data hashes
+  sign(dataHash) {
+    return this.keyPair.sign(dataHash).toHex();
+  }
+
+  // Creates and returns transactions
+  createTransaction(data) {
+    return new Transaction(data, this);
+  }
+
+  // Return public key
+  getPublicKey() {
+    return this.publicKey;
+  }
+}
+
+module.exports = Wallet;

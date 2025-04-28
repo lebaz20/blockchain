@@ -12,26 +12,26 @@ const { v1: uuidv1 } = require("uuid");
 const SHA256 = require("crypto-js/sha256");
 
 class ChainUtil {
-    // a static function to return key-pair generated using a secret phrase
-    static genKeyPair(secret) {
-      return eddsa.keyFromSecret(secret);
-    }
-  
-    // returns ids used in transactions
-    static id() {
-      return uuidv1();
-    }
-  
-    // hashes any data using SHA256
-    static hash(data) {
-      return SHA256(JSON.stringify(data)).toString();
-    }
-  
-    // verifies the signed hash by decrypting it with public key
-    // and matching it with the hash
-    static verifySignature(publicKey, signature, dataHash) {
-      return eddsa.keyFromPublic(publicKey).verify(dataHash, signature);
-    }
+  // a static function to return key-pair generated using a secret phrase
+  static genKeyPair(secret) {
+    return eddsa.keyFromSecret(secret);
   }
-  
-  module.exports = ChainUtil;
+
+  // returns ids used in transactions
+  static id() {
+    return uuidv1();
+  }
+
+  // hashes any data using SHA256
+  static hash(data) {
+    return SHA256(JSON.stringify(data)).toString();
+  }
+
+  // verifies the signed hash by decrypting it with public key
+  // and matching it with the hash
+  static verifySignature(publicKey, signature, dataHash) {
+    return eddsa.keyFromPublic(publicKey).verify(dataHash, signature);
+  }
+}
+
+module.exports = ChainUtil;

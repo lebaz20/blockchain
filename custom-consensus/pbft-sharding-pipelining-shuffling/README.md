@@ -1,11 +1,11 @@
 - Publish blocks
   - share other nodes
   - share blocks to all
-  - >2/3 -> persist
+  - > 2/3 -> persist
 - shuffle
   - share target nodes
     - pass all txs to that subset
   - prepare a new distribution
     - share new connections
     - remove target nodes
-  - repeat this cycle   
+  - repeat this cycle

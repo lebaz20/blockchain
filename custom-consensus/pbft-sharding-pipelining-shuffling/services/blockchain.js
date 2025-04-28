@@ -34,7 +34,7 @@ class Blockchain {
       previousBlock ??
         this.chain[SUBSET_INDEX][this.chain[SUBSET_INDEX].length - 1],
       transactions,
-      wallet
+      wallet,
     );
     return block;
   }
@@ -71,7 +71,7 @@ class Blockchain {
         block.lastHash === lastBlock.hash,
         block.hash === Block.blockHash(block),
         Block.verifyBlock(block),
-        Block.verifyProposer(block, this.getProposer(blocksCount))
+        Block.verifyProposer(block, this.getProposer(blocksCount)),
       );
       console.log("BLOCK INVALID");
       return false;
@@ -81,13 +81,13 @@ class Blockchain {
   // updates the block by appending the prepare and commit messages to the block
   async addUpdatedBlock(hash, blockPool, preparePool, commitPool) {
     const blockExists = await this.waitUntilAvailableBlock(hash, (hash) =>
-      blockPool.existingBlockByHash(hash)
+      blockPool.existingBlockByHash(hash),
     );
     if (blockExists) {
       const block = blockPool.getBlock(hash);
       const previousBlockExists = await this.waitUntilAvailableBlock(
         block.lastHash,
-        (hash) => this.existingBlock(hash)
+        (hash) => this.existingBlock(hash),
       );
       if (previousBlockExists) {
         block.prepareMessages = preparePool.getList(hash);
@@ -115,7 +115,7 @@ class Blockchain {
         } else if (retrialCount <= 50) {
           setTimeout(
             () => recExistingCheck(retryInterval + 1000, retryInterval + 1),
-            retryInterval + 1000
+            retryInterval + 1000,
           );
         } else {
           resolve(false);
@@ -134,7 +134,7 @@ class Blockchain {
         blocks: actualBlocksCount,
         transactions: this.chain[subsetIndex].reduce(
           (sum, block) => sum + block.data.length,
-          0
+          0,
         ),
       };
     });
