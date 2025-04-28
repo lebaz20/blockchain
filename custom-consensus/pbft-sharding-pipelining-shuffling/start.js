@@ -1,17 +1,39 @@
 const { spawn } = require("child_process");
 const axios = require("axios");
+const fs = require("fs");
+const Coreserver = require("./services/coreserver");
+const Blockchain = require("./services/blockchain");
+// Create a write stream to your desired log file
+const logStream = fs.createWriteStream("server.log", { flags: "a" }); // 'a' = append
+
+// Redirect console.log and console.error
+console.log = function (...args) {
+  logStream.write(`[LOG ${new Date().toISOString()}] ${args.join(" ")}\n`);
+  process.stdout.write(`[LOG] ${args.join(" ")}\n`); // Optional: also log to terminal
+};
+
+console.error = function (...args) {
+  logStream.write(`[ERROR ${new Date().toISOString()}] ${args.join(" ")}\n`);
+  process.stderr.write(`[ERROR] ${args.join(" ")}\n`);
+};
 
 // ulimit -n 1228800
 // sudo sysctl -w kern.maxfiles=1228800
 // sudo sysctl -w kern.maxfilesperproc=614400
-const NUMBER_OF_NODES = 256;
-const TRANSACTION_THRESHOLD = 400;
+const NUMBER_OF_NODES = 8;
+const TRANSACTION_THRESHOLD = 2;
 const ACTIVE_SUBSET_OF_NODES = 4;
 
 // phase 1 -> [DONE]: Use subset of validators all the time
 // phase 2 -> Track faulty nodes and do not use them later
 // phase 3 -> Randomly switch between subset and all validators
 // phase 4 -> Weigh towards subset more
+
+const blockchain = new Blockchain(undefined, true);
+const coreServerPort = 4999;
+const coreserver = new Coreserver(coreServerPort, blockchain)
+// starts the p2p server
+coreserver.listen();
 
 function shuffleArray(arr) {
   const copy = arr.slice(); // don't modify original
@@ -84,7 +106,8 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
       TRANSACTION_THRESHOLD,
       NUMBER_OF_NODES: ACTIVE_SUBSET_OF_NODES,
       NODES_SUBSET: JSON.stringify(nodesSubset),
-      SUBSET_INDEX: `SUBSET${subsetIndex + 1}`
+      SUBSET_INDEX: `SUBSET${subsetIndex + 1}`,
+      CORE: `ws://localhost:${coreServerPort}`
     };
 
     let promise;

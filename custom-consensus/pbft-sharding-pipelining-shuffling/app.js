@@ -1,6 +1,6 @@
 // Import all required models
 const express = require("express");
-const axios = require('axios');
+const axios = require("axios");
 const bodyParser = require("body-parser");
 const { NODES_SUBSET, SUBSET_INDEX } = require("./config");
 const Wallet = require("./services/wallet");
@@ -12,6 +12,8 @@ const BlockPool = require("./services/pools/block");
 const CommitPool = require("./services/pools/commit");
 const PreparePool = require("./services/pools/prepare");
 const MessagePool = require("./services/pools/message");
+const MESSAGE_TYPE = require("./constants/message");
+
 const HTTP_PORT = process.env.HTTP_PORT || 3001;
 const REDIRECT_TO_PORT = process.env.REDIRECT_TO_PORT;
 
@@ -50,37 +52,40 @@ app.get("/blocks", (req, res) => {
 
 // sends the chain total to the user
 app.get("/total", (req, res) => {
-  const total = { total: blockchain.getTotal(), unassignedTransactions: transactionPool.transactions.unassigned.length };
+  const total = {
+    total: blockchain.getTotal(),
+    unassignedTransactions: transactionPool.transactions.unassigned.length,
+  };
   console.log(`REQUEST TOTAL FOR #${SUBSET_INDEX}:`, JSON.stringify(total));
   res.json(total);
 });
 
 // check server health
 app.get("/health", (req, res) => {
-  res.status(200).send('Ok');
+  res.status(200).send("Ok");
 });
-
 
 // creates transactions for the sent data
 app.post("/transaction", async (req, res) => {
   if (REDIRECT_TO_PORT) {
     console.log(`Redirect from ${HTTP_PORT} to ${REDIRECT_TO_PORT}`);
     try {
-        const response = await axios({
-            method: req.method,
-            url: `http://localhost:${REDIRECT_TO_PORT}/transaction`,
-            // headers: req.headers,
-            data: req.body
-        });
-        res.status(response.status).send(response.data);
+      const response = await axios({
+        method: req.method,
+        url: `http://localhost:${REDIRECT_TO_PORT}/transaction`,
+        // headers: req.headers,
+        data: req.body,
+      });
+      res.status(response.status).send(response.data);
     } catch (error) {
-        res.status(error.response?.status || 500).send(error.message);
+      res.status(error.response?.status || 500).send(error.message);
     }
   } else {
     const data = req.body;
     console.log(`Processing transaction on ${HTTP_PORT}`);
     const transaction = wallet.createTransaction(data);
     p2pserver.broadcastTransaction(transaction);
+    p2pserver.parseMessage({ type: MESSAGE_TYPE.transaction, transaction });
     res.redirect("/total");
   }
 });
