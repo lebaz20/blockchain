@@ -1,0 +1,50 @@
+{
+    "SUBSET1": {
+        "total": {
+            "blocks": 77,
+            "transactions": 768
+            },
+            "unassignedTransactions":0
+        },
+    "SUBSET2": {
+        "total": {
+            "blocks": 65,
+            "transactions":648
+            },
+            "unassignedTransactions":7
+        },
+    "total": {
+        "blocks": 142,
+        "transactions":1416
+    },
+    "unassignedTransactions":7
+
+}
+
+[LOG 2025-03-24T09:52:01.090Z] P2P TOTAL FOR #SUBSET1: {"total":{"blocks":38,"transactions":370},"unassignedTransactions":121}
+[LOG 2025-03-24T09:52:05.607Z] P2P TOTAL FOR #SUBSET2: {"total":{"blocks":70,"transactions":702},"unassignedTransactions":11}
+
+
+
+[LOG 2025-04-03T16:27:16.129Z] REQUEST TOTAL FOR #SUBSET1: {"total":{"blocks":176,"transactions":2355},"unassignedTransactions":17}
+[LOG 2025-04-03T16:27:15.910Z] REQUEST TOTAL FOR #SUBSET2: {"total":{"blocks":101,"transactions":1092},"unassignedTransactions":1309}
+
+
+[LOG 2025-04-03T17:39:17.238Z] REQUEST TOTAL FOR #SUBSET1: {"total":{"blocks":54,"transactions":530},"unassignedTransactions":10}
+[LOG 2025-04-03T17:39:16.778Z] REQUEST TOTAL FOR #SUBSET2: {"total":{"blocks":86,"transactions":850},"unassignedTransactions":7}
+
+
+[LOG 2025-04-03T17:47:45.746Z] REQUEST TOTAL FOR #SUBSET1: {"total":{"blocks":95,"transactions":947},"unassignedTransactions":1706}
+[LOG 2025-04-03T17:47:45.768Z] REQUEST TOTAL FOR #SUBSET2: {"total":{"blocks":69,"transactions":683},"unassignedTransactions":1955}
+
+
+[LOG 2025-04-04T14:46:26.105Z] 5007 P2P TOTAL FOR #SUBSET1: {"total":{"blocks":49,"transactions":480},"unassignedTransactions":0}
+[LOG 2025-04-04T14:49:00.071Z] 5002 P2P TOTAL FOR #SUBSET2: {"total":{"blocks":50,"transactions":490},"unassignedTransactions":6}
+
+
+[LOG 2025-04-04T14:58:12.964Z] REQUEST TOTAL FOR #SUBSET1: {"total":{"blocks":34,"transactions":3300},"unassignedTransactions":62}
+[LOG 2025-04-04T14:58:12.924Z] REQUEST TOTAL FOR #SUBSET2: {"total":{"blocks":34,"transactions":3300},"unassignedTransactions":45}
+
+
+[LOG 2025-04-04T15:30:37.541Z] REQUEST TOTAL FOR #SUBSET1: {"total":{"blocks":13,"transactions":4800},"unassignedTransactions":14}
+[LOG 2025-04-04T15:30:37.965Z] REQUEST TOTAL FOR #SUBSET2: {"total":{"blocks":13,"transactions":4800},"unassignedTransactions":216}
