@@ -1,4 +1,4 @@
-const ChainUtil = require("../../utils/chain");
+const ChainUtility = require("../../utils/chain");
 
 class CommitPool {
   // list object is a map that holds a list of commit messages for a hash of a block
@@ -45,7 +45,7 @@ class CommitPool {
 
   // checks if the commit message is valid or not
   isValidCommit(commit) {
-    return ChainUtil.verifySignature(
+    return ChainUtility.verifySignature(
       commit.publicKey,
       commit.signature,
       commit.blockHash,

@@ -1,5 +1,3 @@
-const Block = require("../block");
-
 class BlockPool {
   constructor() {
     this.blocks = [];

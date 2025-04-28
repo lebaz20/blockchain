@@ -1,4 +1,4 @@
-const ChainUtil = require("../../utils/chain");
+const ChainUtility = require("../../utils/chain");
 
 class PreparePool {
   // list object is a map that holds a list of prepare messages for a hash of a block
@@ -51,7 +51,7 @@ class PreparePool {
 
   // checks if the prepare message is valid or not
   isValidPrepare(prepare) {
-    return ChainUtil.verifySignature(
+    return ChainUtility.verifySignature(
       prepare.publicKey,
       prepare.signature,
       prepare.blockHash,

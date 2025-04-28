@@ -7,14 +7,14 @@ const MESSAGE_TYPE = require("../constants/message");
 const logStream = fs.createWriteStream("server.log", { flags: "a" }); // 'a' = append
 
 // Redirect console.log and console.error
-console.log = function (...args) {
-  logStream.write(`[LOG ${new Date().toISOString()}] ${args.join(" ")}\n`);
-  process.stdout.write(`[LOG] ${args.join(" ")}\n`); // Optional: also log to terminal
+console.log = function (...arguments_) {
+  logStream.write(`[LOG ${new Date().toISOString()}] ${arguments_.join(" ")}\n`);
+  process.stdout.write(`[LOG] ${arguments_.join(" ")}\n`); // Optional: also log to terminal
 };
 
-console.error = function (...args) {
-  logStream.write(`[ERROR ${new Date().toISOString()}] ${args.join(" ")}\n`);
-  process.stderr.write(`[ERROR] ${args.join(" ")}\n`);
+console.error = function (...arguments_) {
+  logStream.write(`[ERROR ${new Date().toISOString()}] ${arguments_.join(" ")}\n`);
+  process.stderr.write(`[ERROR] ${arguments_.join(" ")}\n`);
 };
 
 // import the min approval constant which will be used to compare the count the messages
@@ -55,7 +55,7 @@ class P2pserver {
   // Creates a server on a given port
   listen() {
     const server = new WebSocket.Server({ port: P2P_PORT });
-    server.on("connection", (socket, req) => {
+    server.on("connection", (socket) => {
       this.connectSocket(socket);
       this.messageHandler(socket);
     });
@@ -446,7 +446,7 @@ class P2pserver {
           data.subsetIndex != SUBSET_INDEX &&
           isCore === true
         ) {
-          const result = this.blockchain.addBlock(data.block, data.subsetIndex);
+          this.blockchain.addBlock(data.block, data.subsetIndex);
           const total = { total: this.blockchain.getTotal() };
           console.log(
             P2P_PORT,

@@ -83,7 +83,7 @@ class Coreserver {
           if (
             !this.blockchain.existingBlock(data.block.hash, data.subsetIndex)
           ) {
-            const result = this.blockchain.addBlock(
+            this.blockchain.addBlock(
               data.block,
               data.subsetIndex,
             );
@@ -96,32 +96,32 @@ class Coreserver {
     });
   }
 
-  shuffleArray(arr) {
-    const copy = arr.slice(); // don't modify original
-    for (let i = copy.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [copy[i], copy[j]] = [copy[j], copy[i]]; // swap
+  shuffleArray(array) {
+    const copy = array.slice(); // don't modify original
+    for (let index = copy.length - 1; index > 0; index--) {
+      const index_ = Math.floor(Math.random() * (index + 1));
+      [copy[index], copy[index_]] = [copy[index_], copy[index]]; // swap
     }
     return copy;
   }
 
-  splitIntoFoursWithRemaining(arr) {
+  splitIntoFoursWithRemaining(array) {
     const result = [];
-    let i = 0;
+    let index = 0;
 
-    while (arr.length - i >= 4) {
-      result.push(arr.slice(i, i + 4));
-      i += 4;
+    while (array.length - index >= 4) {
+      result.push(array.slice(index, index + 4));
+      index += 4;
     }
 
     // Last group with remaining 4 or more
-    result[result.length - 1] = [...result[result.length - 1], ...arr.slice(i)];
+    result[result.length - 1] = [...result[result.length - 1], ...array.slice(index)];
 
     return result;
   }
 
   getRandomIndicesArrays(array) {
-    const indices = Array.from({ length: array.length }, (_, i) => i);
+    const indices = Array.from({ length: array.length }, (_, index) => index);
     return this.splitIntoFoursWithRemaining(this.shuffleArray(indices));
   }
 }

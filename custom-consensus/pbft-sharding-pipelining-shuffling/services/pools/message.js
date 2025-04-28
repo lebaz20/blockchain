@@ -1,4 +1,4 @@
-const ChainUtil = require("../../utils/chain");
+const ChainUtility = require("../../utils/chain");
 
 class MessagePool {
   // list object is a map that holds a list of messages for a hash of a block
@@ -13,7 +13,7 @@ class MessagePool {
       publicKey: wallet.getPublicKey(),
       message: this.message,
       blockHash,
-      signature: wallet.sign(ChainUtil.hash(this.message + blockHash)),
+      signature: wallet.sign(ChainUtility.hash(this.message + blockHash)),
     };
 
     this.list[blockHash] = [roundChange];
@@ -40,10 +40,10 @@ class MessagePool {
 
   // checks if the message is valid or not
   isValidMessage(message) {
-    return ChainUtil.verifySignature(
+    return ChainUtility.verifySignature(
       message.publicKey,
       message.signature,
-      ChainUtil.hash(message.message + message.blockHash),
+      ChainUtility.hash(message.message + message.blockHash),
     );
   }
 }

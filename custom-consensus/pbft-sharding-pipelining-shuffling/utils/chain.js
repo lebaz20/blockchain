@@ -11,7 +11,7 @@ const { v1: uuidv1 } = require("uuid");
 // used for hashing data to 256 bits string
 const SHA256 = require("crypto-js/sha256");
 
-class ChainUtil {
+class ChainUtility {
   // a static function to return key-pair generated using a secret phrase
   static genKeyPair(secret) {
     return eddsa.keyFromSecret(secret);
@@ -34,4 +34,4 @@ class ChainUtil {
   }
 }
 
-module.exports = ChainUtil;
+module.exports = ChainUtility;

@@ -126,7 +126,7 @@ class Blockchain {
   }
 
   // get total number of blocks and transactions
-  getTotal(isCore = false) {
+  getTotal() {
     const total = {};
     Object.keys(this.chain).forEach((subsetIndex) => {
       const actualBlocksCount = this.chain[subsetIndex].length;

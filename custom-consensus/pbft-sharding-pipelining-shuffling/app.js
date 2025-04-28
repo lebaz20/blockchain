@@ -41,52 +41,52 @@ const p2pserver = new P2pserver(
 );
 
 // sends all transactions in the transaction pool to the user
-app.get("/transactions", (req, res) => {
-  res.json(transactionPool.transactions);
+app.get("/transactions", (request, response) => {
+  response.json(transactionPool.transactions);
 });
 
 // sends the entire chain to the user
-app.get("/blocks", (req, res) => {
-  res.json(blockchain.chain);
+app.get("/blocks", (request, response) => {
+  response.json(blockchain.chain);
 });
 
 // sends the chain total to the user
-app.get("/total", (req, res) => {
+app.get("/total", (request, response) => {
   const total = {
     total: blockchain.getTotal(),
     unassignedTransactions: transactionPool.transactions.unassigned.length,
   };
   console.log(`REQUEST TOTAL FOR #${SUBSET_INDEX}:`, JSON.stringify(total));
-  res.json(total);
+  response.json(total);
 });
 
 // check server health
-app.get("/health", (req, res) => {
-  res.status(200).send("Ok");
+app.get("/health", (request, response) => {
+  response.status(200).send("Ok");
 });
 
 // creates transactions for the sent data
-app.post("/transaction", async (req, res) => {
+app.post("/transaction", async (request, response) => {
   if (REDIRECT_TO_PORT) {
     console.log(`Redirect from ${HTTP_PORT} to ${REDIRECT_TO_PORT}`);
     try {
-      const response = await axios({
-        method: req.method,
+      const redirectResponse = await axios({
+        method: request.method,
         url: `http://localhost:${REDIRECT_TO_PORT}/transaction`,
         // headers: req.headers,
-        data: req.body,
+        data: request.body,
       });
-      res.status(response.status).send(response.data);
+      response.status(redirectResponse.status).send(redirectResponse.data);
     } catch (error) {
-      res.status(error.response?.status || 500).send(error.message);
+      response.status(error.response?.status || 500).send(error.message);
     }
   } else {
-    const data = req.body;
+    const data = request.body;
     console.log(`Processing transaction on ${HTTP_PORT}`);
     const transaction = wallet.createTransaction(data);
     p2pserver.broadcastTransaction(transaction);
     p2pserver.parseMessage({ type: MESSAGE_TYPE.transaction, transaction });
-    res.redirect("/total");
+    response.redirect("/total");
   }
 });
 

@@ -1,6 +1,6 @@
 // Import SHA256 used for hashing and ChainUtil for verifying signature
 const SHA256 = require("crypto-js/sha256");
-const ChainUtil = require("../utils/chain");
+const ChainUtility = require("../utils/chain");
 
 class Block {
   constructor(
@@ -84,7 +84,7 @@ class Block {
 
   // checks if the block is valid
   static verifyBlock(block) {
-    return ChainUtil.verifySignature(
+    return ChainUtility.verifySignature(
       block.proposer,
       block.signature,
       Block.hash(block.timestamp, block.lastHash, block.data),
