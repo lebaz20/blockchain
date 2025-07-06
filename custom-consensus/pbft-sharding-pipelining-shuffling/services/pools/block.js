@@ -1,7 +1,6 @@
 class BlockPool {
   constructor() {
     this.blocks = [];
-    this.latestInflightBlock = undefined;
   }
 
   // check if the block exists or not
@@ -16,12 +15,6 @@ class BlockPool {
   addBlock(block) {
     this.blocks.push(block);
     console.log("added block to pool");
-  }
-
-  // pushes block to the chain
-  setLatestInflightBlock(block) {
-    this.latestInflightBlock = block;
-    console.log("set latest Inflight Block#", block.hash);
   }
 
   // returns the block for the given hash

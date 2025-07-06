@@ -19,7 +19,7 @@ console.error = function (...arguments_) {
 
 // import the min approval constant which will be used to compare the count the messages
 // import active subset of nodes to use in validation
-const { MIN_APPROVALS, SUBSET_INDEX } = require("../config");
+const { MIN_APPROVALS, SUBSET_INDEX, TRANSACTION_THRESHOLD } = require("../config");
 
 // declare a p2p server port on which it would listen for messages
 // we will pass the port through command line
@@ -50,6 +50,7 @@ class P2pserver {
     this.commitPool = commitPool;
     this.messagePool = messagePool;
     this.validators = validators;
+    this.lastTransactionCreatedAt = undefined;
   }
 
   // Creates a server on a given port
@@ -226,6 +227,85 @@ class P2pserver {
     });
   }
 
+  initiateBlockCreation() {
+    this.lastTransactionCreatedAt = new Date();
+    const thresholdReached = this.transactionPool.poolFull();
+    // check if limit reached
+    if (thresholdReached) {
+      console.log(
+        P2P_PORT,
+        "THRESHOLD REACHED, TOTAL NOW:",
+        this.transactionPool.transactions.unassigned.length,
+      );
+      // check the current node is the proposer
+      let readyToPropose = true;
+      const lastUnpersistedBlock =
+        this.blockPool.blocks[this.blockPool.blocks.length - 1];
+      if (this.transactionPool.getInflightBlocks().length > 1) {
+        readyToPropose = this.preparePool.isBlockPrepared(
+          lastUnpersistedBlock,
+          this.wallet,
+        );
+      }
+      console.log(
+        P2P_PORT,
+        "PROPOSE BLOCK CONDITION",
+        this.blockchain.getProposer() == this.wallet.getPublicKey(),
+        readyToPropose,
+        this.transactionPool.getInflightBlocks(),
+      );
+      if (
+        this.blockchain.getProposer() == this.wallet.getPublicKey() &&
+        readyToPropose &&
+        this.transactionPool.getInflightBlocks().length <= 4
+      ) {
+        console.log(P2P_PORT, "PROPOSING BLOCK");
+        // if the node is the proposer, create a block and broadcast it
+        const previousBlock =
+          this.transactionPool.getInflightBlocks().length > 1
+            ? lastUnpersistedBlock
+            : undefined;
+        const transactionsBatch = this.transactionPool.transactions.unassigned.splice(0, TRANSACTION_THRESHOLD);
+        const block = this.blockchain.createBlock(
+          transactionsBatch,
+          this.wallet,
+          previousBlock,
+        );
+        console.log(P2P_PORT, "CREATED BLOCK", {
+          lastHash: block.lastHash,
+          hash: block.hash,
+          data: block.data,
+        });
+        // assign block transactions to the block
+        // Release assignment after x time in case block creation doesn't succeed
+        this.transactionPool.assignTransactions(block);
+
+        this.broadcastPrePrepare(
+          block,
+          this.blockchain.chain[SUBSET_INDEX].length,
+          previousBlock,
+        );
+      }
+    } else {
+      console.log(P2P_PORT, "Transaction Threshold NOT REACHED, TOTAL UNASSIGNED NOW:", this.transactionPool.transactions.unassigned.length);
+    }
+
+    // If lastTransactionCreatedAt is more than 1 minute ago, run after timeout, else run immediately  
+    // Debounce block creation: only call after timeout if not triggered by normal traffic
+    clearTimeout(this._blockCreationTimeout);
+    this._blockCreationTimeout = setTimeout(() => {
+      const now = new Date();
+      // If no new transaction has triggered initiateBlockCreation in the last 60s, call it manually
+      if (
+      this.lastTransactionCreatedAt &&
+      now - this.lastTransactionCreatedAt >= 50 * 1000 /* 50 seconds */ && 
+      this.transactionPool.transactions.unassigned.length > 0
+      ) {
+      this.initiateBlockCreation();
+      }
+    }, 1 * 60 * 1000); // 1 minute
+  }
+
   // parse message
   async parseMessage(data, isCore) {
     console.log(P2P_PORT, "RECEIVED", data.type);
@@ -239,7 +319,7 @@ class P2pserver {
           this.transactionPool.verifyTransaction(data.transaction) &&
           this.validators.isValidValidator(data.transaction.from)
         ) {
-          let thresholdReached = this.transactionPool.addTransaction(
+          this.transactionPool.addTransaction(
             data.transaction,
           );
           console.log(
@@ -250,64 +330,7 @@ class P2pserver {
           // send transactions to other nodes
           this.broadcastTransaction(data.transaction);
 
-          // check if limit reached
-          if (thresholdReached) {
-            console.log(
-              P2P_PORT,
-              "THRESHOLD REACHED, TOTAL NOW:",
-              this.transactionPool.transactions.unassigned.length,
-            );
-            // check the current node is the proposer
-            let readyToPropose = true;
-            const lastUnpersistedBlock =
-              this.blockPool.blocks[this.blockPool.blocks.length - 1];
-            if (this.transactionPool.getInflightBlocks().length > 1) {
-              readyToPropose = this.preparePool.isBlockPrepared(
-                lastUnpersistedBlock,
-                this.wallet,
-              );
-            }
-            console.log(
-              P2P_PORT,
-              "PROPOSE BLOCK CONDITION",
-              this.blockchain.getProposer() == this.wallet.getPublicKey(),
-              readyToPropose,
-              this.transactionPool.getInflightBlocks(),
-            );
-            if (
-              this.blockchain.getProposer() == this.wallet.getPublicKey() &&
-              readyToPropose &&
-              this.transactionPool.getInflightBlocks().length <= 4
-            ) {
-              console.log(P2P_PORT, "PROPOSING BLOCK");
-              // if the node is the proposer, create a block and broadcast it
-              const previousBlock =
-                this.transactionPool.getInflightBlocks().length > 1
-                  ? lastUnpersistedBlock
-                  : undefined;
-              const block = this.blockchain.createBlock(
-                this.transactionPool.transactions.unassigned,
-                this.wallet,
-                previousBlock,
-              );
-              console.log(P2P_PORT, "CREATED BLOCK", {
-                lastHash: block.lastHash,
-                hash: block.hash,
-                data: block.data,
-              });
-              // assign block transactions to the block
-              // TODO: release assignment after x time in case block creation doesn't succeed
-              this.transactionPool.assignTransactions(block, this.blockPool);
-
-              this.broadcastPrePrepare(
-                block,
-                this.blockchain.chain[SUBSET_INDEX].length,
-                previousBlock,
-              );
-            }
-          } else {
-            console.log(P2P_PORT, "Transaction Added");
-          }
+          this.initiateBlockCreation();
         }
         break;
       case MESSAGE_TYPE.pre_prepare:
@@ -324,8 +347,8 @@ class P2pserver {
           this.blockPool.addBlock(data.block);
 
           // assign block transactions to the block
-          // TODO: release assignment after x time in case block creation doesn't succeed
-          this.transactionPool.assignTransactions(data.block, this.blockPool);
+          // Release assignment after x time in case block creation doesn't succeed
+          this.transactionPool.assignTransactions(data.block);
 
           // send to other nodes
           this.broadcastPrePrepare(
@@ -397,6 +420,15 @@ class P2pserver {
                 this.blockchain.chain[SUBSET_INDEX].length,
                 data.commit.blockHash,
               );
+              // Send a round change message to nodes
+              let message = this.messagePool.createMessage(
+                this.blockchain.chain[SUBSET_INDEX][
+                  this.blockchain.chain[SUBSET_INDEX].length - 1
+                ],
+                this.wallet,
+              );
+              this.broadcastRoundChange(message);
+
             } else {
               console.log(
                 P2P_PORT,
@@ -416,14 +448,6 @@ class P2pserver {
               JSON.stringify(stats),
             );
           }
-          // Send a round change message to nodes
-          let message = this.messagePool.createMessage(
-            this.blockchain.chain[SUBSET_INDEX][
-              this.blockchain.chain[SUBSET_INDEX].length - 1
-            ].hash,
-            this.wallet,
-          );
-          this.broadcastRoundChange(message);
         }
         break;
 
@@ -451,7 +475,7 @@ class P2pserver {
               "TRANSACTION POOL TO BE CLEARED, TOTAL NOW:",
               this.transactionPool.transactions[data.message.blockHash]?.length,
             );
-            this.transactionPool.clear(data.message.blockHash);
+            this.transactionPool.clear(data.message.blockHash, data.message.data);
           }
         }
         break;

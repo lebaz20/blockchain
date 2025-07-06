@@ -8,15 +8,16 @@ class MessagePool {
   }
 
   // creates a round change message for the given block hash
-  createMessage(blockHash, wallet) {
+  createMessage(block, wallet) {
     let roundChange = {
       publicKey: wallet.getPublicKey(),
       message: this.message,
-      blockHash,
-      signature: wallet.sign(ChainUtility.hash(this.message + blockHash)),
+      blockHash: block.hash,
+      data: block.data,
+      signature: wallet.sign(ChainUtility.hash(this.message + block.hash)),
     };
 
-    this.list[blockHash] = [roundChange];
+    this.list[block.hash] = [roundChange];
     return roundChange;
   }
 

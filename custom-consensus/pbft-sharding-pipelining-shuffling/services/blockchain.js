@@ -99,7 +99,8 @@ class Blockchain {
         block.lastHash,
         (hash) => this.existingBlock(hash),
       );
-      if (previousBlockExists) {
+      if (previousBlockExists && this.transactionPool.hashExists(block.hash)) {
+        this.transactionPool.removeDuplicates(block.hash, block.data);
         block.prepareMessages = preparePool.getList(hash);
         block.commitMessages = commitPool.getList(hash);
         this.addBlock(block);
@@ -153,12 +154,16 @@ class Blockchain {
 
   // get shard rate of blocks and transactions
   getRate() {
-    // Infinite round change issue
+    // Infinite round change issue -> run it only on success
 
-    // Unassigned processing issue
+    // Unassigned processing issue -> run on timeout in case of idle traffic, release assigned transactions after timeout in case of faults
+    
+    // ....
+
+    // No blocks are created!
 
     // faulty = record errors, rates = cpu utilization
-
+ 
     // Then introduce faulty nodes
 
     // Then run shuffling
