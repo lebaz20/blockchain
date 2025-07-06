@@ -1,5 +1,6 @@
 // Import transaction class used for verification
 const Transaction = require("../transaction");
+const RateUtility = require("../../utils/rate");
 
 // Transaction threshold is the limit or the holding capacity of the nodes
 // Once this exceeds a new block is generated
@@ -9,6 +10,8 @@ class TransactionPool {
   constructor() {
     this.transactions = { unassigned: [] };
     this.latestInflightBlock = undefined;
+    // Track the rate of incoming transactions
+    this.ratePerMin = {};
   }
 
   // pushes transactions in the list
@@ -16,6 +19,9 @@ class TransactionPool {
   // else returns false
   addTransaction(transaction) {
     this.transactions.unassigned.push(transaction);
+    
+    RateUtility.updateRatePerMin(this.ratePerMin, transaction.createdAt);
+
     return this.poolFull();
   }
 

@@ -1,6 +1,8 @@
 // import the ws module
 const WebSocket = require("ws");
 const MESSAGE_TYPE = require("../constants/message");
+const axios = require('axios')
+const { spawn } = require('child_process')
 
 class Coreserver {
   constructor(port, blockchain) {
@@ -8,6 +10,7 @@ class Coreserver {
     this.sockets = {};
     this.socketsMap = {};
     this.blockchain = blockchain;
+    this.rates = {};
   }
 
   // Creates a server on a given port
@@ -66,7 +69,7 @@ class Coreserver {
   }
 
   // handles any message sent to the current node
-  messageHandler(socket, isCore = false) {
+  messageHandler(socket) {
     // registers message handler
     socket.on("message", async (message) => {
       if (Buffer.isBuffer(message)) {
@@ -87,10 +90,23 @@ class Coreserver {
               data.block,
               data.subsetIndex,
             );
-            const total = { total: this.blockchain.getTotal(isCore) };
-            console.log(`CORE TOTAL:`, JSON.stringify(total));
+            const stats = { total: this.blockchain.getTotal(), rate: this.rates };
+            console.log(`CORE TOTAL:`, JSON.stringify(stats));
             this.broadcastBlock(data.block, data.subsetIndex);
           }
+          break;
+        case MESSAGE_TYPE.rate_to_core:
+          // collect shards rates
+          if (
+            !this.rates[data.rate.shardIndex] || this.rates[data.rate.shardIndex].transactions < data.rate.transactions[data.rate.shardIndex]
+          ) {
+            this.rates[data.rate.shardIndex] = {
+              transactions: data.rate.transactions[data.rate.shardIndex],
+              blocks: data.rate.blocks[data.rate.shardIndex],
+              shardStatus: data.rate.shardStatus 
+            };
+          }
+          console.log(`CORE STATS:`, JSON.stringify(this.rates));
           break;
       }
     });
@@ -123,6 +139,37 @@ class Coreserver {
   getRandomIndicesArrays(array) {
     const indices = Array.from({ length: array.length }, (_, index) => index);
     return this.splitIntoFoursWithRemaining(this.shuffleArray(indices));
+  }
+
+  waitForWebServer(url, retryInterval = 1000) {
+    return new Promise((resolve) => {
+      function checkWebServer() {
+        axios
+          .get(url + '/health')
+          .then(() => {
+            console.log(`WebServer is open: ${url}`)
+            resolve(true)
+            return true
+          })
+          .catch(() => {
+            // console.log(`WebServer ${url} not available, retrying...`);
+            setTimeout(checkWebServer, retryInterval + 1000)
+          })
+      }
+  
+      checkWebServer()
+    })
+  }
+
+  initP2pServer(environment) {
+    const serverProcess = spawn('node', ['app.js'], {
+      stdio: 'inherit',
+      env: environment
+    })
+  
+    serverProcess.on('close', (code) => {
+      console.log(`Server exited with code ${code}`)
+    })
   }
 }
 

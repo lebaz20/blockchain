@@ -10,6 +10,7 @@ class Transaction {
     this.input = { data: data, timestamp: Date.now() };
     this.hash = ChainUtility.hash(this.input);
     this.signature = wallet.sign(this.hash);
+    this.createdAt = Date.now();
     // console.log({
     //   id: this.id, from: this.from, input: this.input, signature: this.signature, hash: this.hash
     // });

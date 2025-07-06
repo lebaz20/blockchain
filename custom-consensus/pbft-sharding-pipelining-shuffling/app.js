@@ -24,7 +24,7 @@ app.use(bodyParser.json());
 const wallet = new Wallet(process.env.SECRET);
 const transactionPool = new TransactionPool();
 const validators = new Validators(NODES_SUBSET);
-const blockchain = new Blockchain(validators);
+const blockchain = new Blockchain(validators, transactionPool);
 const blockPool = new BlockPool();
 const preparePool = new PreparePool();
 const commitPool = new CommitPool();
@@ -50,14 +50,15 @@ app.get("/blocks", (request, response) => {
   response.json(blockchain.chain);
 });
 
-// sends the chain total to the user
-app.get("/total", (request, response) => {
-  const total = {
+// sends the chain stats to the user
+app.get("/stats", (request, response) => {
+  const stats = {
     total: blockchain.getTotal(),
+    rate: blockchain.getRate(),
     unassignedTransactions: transactionPool.transactions.unassigned.length,
   };
-  console.log(`REQUEST TOTAL FOR #${SUBSET_INDEX}:`, JSON.stringify(total));
-  response.json(total);
+  console.log(`REQUEST STATS FOR #${SUBSET_INDEX}:`, JSON.stringify(stats));
+  response.json(stats);
 });
 
 // check server health
@@ -86,7 +87,7 @@ app.post("/transaction", async (request, response) => {
     const transaction = wallet.createTransaction(data);
     p2pserver.broadcastTransaction(transaction);
     p2pserver.parseMessage({ type: MESSAGE_TYPE.transaction, transaction });
-    response.redirect("/total");
+    response.redirect("/stats");
   }
 });
 

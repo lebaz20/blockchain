@@ -61,6 +61,12 @@ class P2pserver {
     });
     this.connectToPeers();
     this.connectToCore();
+
+    setInterval(() => {
+      const rate = this.blockchain.getRate();
+      console.log(`RATE INTERVAL BROADCAST ${SUBSET_INDEX}`, JSON.stringify(rate));
+      this.broadcastRateToCore(rate);
+    }, 30000); // every 1 minute
   }
 
   // connects to a given socket and registers the message handler on it
@@ -193,6 +199,16 @@ class P2pserver {
         type: MESSAGE_TYPE.block_to_core,
         block,
         subsetIndex: SUBSET_INDEX,
+      }),
+    );
+  }
+
+  // broadcasts rate to core
+  broadcastRateToCore(rate) {
+    this.coreSocket?.send(
+      JSON.stringify({
+        type: MESSAGE_TYPE.rate_to_core,
+        rate,
       }),
     );
   }
@@ -388,15 +404,16 @@ class P2pserver {
                 this.blockchain.chain[SUBSET_INDEX].length,
               );
             }
-            const total = {
+            const stats = {
               total: this.blockchain.getTotal(),
+              rate: this.blockchain.getRate(),
               unassignedTransactions:
                 this.transactionPool.transactions.unassigned.length,
             };
             console.log(
               P2P_PORT,
-              `P2P TOTAL FOR #${SUBSET_INDEX}:`,
-              JSON.stringify(total),
+              `P2P STATS FOR #${SUBSET_INDEX}:`,
+              JSON.stringify(stats),
             );
           }
           // Send a round change message to nodes
@@ -447,11 +464,11 @@ class P2pserver {
           isCore === true
         ) {
           this.blockchain.addBlock(data.block, data.subsetIndex);
-          const total = { total: this.blockchain.getTotal() };
+          const stats = { total: this.blockchain.getTotal(), rate: this.blockchain.getRate() };
           console.log(
             P2P_PORT,
-            `P2P TOTAL FOR #${SUBSET_INDEX}:`,
-            JSON.stringify(total),
+            `P2P STATS FOR #${SUBSET_INDEX}:`,
+            JSON.stringify(stats),
           );
         }
     }

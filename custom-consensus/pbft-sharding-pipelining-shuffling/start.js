@@ -1,5 +1,3 @@
-const { spawn } = require('child_process')
-const axios = require('axios')
 const fs = require('fs')
 const Coreserver = require('./services/coreserver')
 const Blockchain = require('./services/blockchain')
@@ -22,49 +20,19 @@ console.error = function (...arguments_) {
 // ulimit -n 1228800
 // sudo sysctl -w kern.maxfiles=1228800
 // sudo sysctl -w kern.maxfilesperproc=614400
+// for port in {3001..3032}; do lsof -ti tcp:$port; done | xargs -r kill -9
 const NUMBER_OF_NODES = 8
-const TRANSACTION_THRESHOLD = 2
+const TRANSACTION_THRESHOLD = 20
 const ACTIVE_SUBSET_OF_NODES = 4
-
-function waitForWebServer(url, retryInterval = 1000) {
-  return new Promise((resolve) => {
-    function checkWebServer() {
-      axios
-        .get(url + '/health')
-        .then(() => {
-          console.log(`WebServer is open: ${url}`)
-          resolve(true)
-          return true
-        })
-        .catch(() => {
-          // console.log(`WebServer ${url} not available, retrying...`);
-          setTimeout(checkWebServer, retryInterval + 1000)
-        })
-    }
-
-    checkWebServer()
-  })
-}
 
 let coreServerPort
 let coreserver
 function initCoreServer() {
-  const blockchain = new Blockchain(undefined, true)
+  const blockchain = new Blockchain(undefined, undefined, true)
   coreServerPort = 4999
   coreserver = new Coreserver(coreServerPort, blockchain)
   // starts the p2p server
   coreserver.listen()
-}
-
-function initP2pServer(environment) {
-  const serverProcess = spawn('node', ['app.js'], {
-    stdio: 'inherit',
-    env: environment
-  })
-
-  serverProcess.on('close', (code) => {
-    console.log(`Server exited with code ${code}`)
-  })
 }
 
 initCoreServer()
@@ -107,7 +75,7 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
         console.log(`Peers for ${5001 + index}: `, peersSubset)
         promise = Promise.all(
           peersSubset.map((peer) =>
-            waitForWebServer(peer.replace('ws', 'http').replace('500', '300'))
+            coreserver.waitForWebServer(peer.replace('ws', 'http').replace('500', '300'))
           )
         )
         environmentVariables.PEERS = peersSubset.join(',')
@@ -118,7 +86,7 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
       if (promise) {
         promise
           .then(() => {
-            initP2pServer(environmentVariables)
+            coreserver.initP2pServer(environmentVariables)
             if (index == NUMBER_OF_NODES - 1) {
               console.log(
                 '########################...All set! Ready for testing...########################'
@@ -130,7 +98,7 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
             console.error('P2P server init failure', error)
           })
       } else {
-        initP2pServer(environmentVariables)
+        coreserver.initP2pServer(environmentVariables)
         if (index == NUMBER_OF_NODES - 1) {
           console.log(
             '########################...All set! Ready for testing...########################'

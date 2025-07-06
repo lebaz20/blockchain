@@ -8,6 +8,7 @@ const MESSAGE_TYPE = {
   round_change: "ROUND_CHANGE",
   block_to_core: "BLOCK_TO_CORE",
   block_from_core: "BLOCK_FROM_CORE",
+  rate_to_core: "RATE_TO_CORE",
 };
 
 module.exports = MESSAGE_TYPE;
