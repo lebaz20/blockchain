@@ -22,7 +22,7 @@ console.error = function (...arguments_) {
 // sudo sysctl -w kern.maxfilesperproc=614400
 // for port in {3001..3032}; do lsof -ti tcp:$port; done | xargs -r kill -9
 const NUMBER_OF_NODES = 8
-const TRANSACTION_THRESHOLD = 20
+const TRANSACTION_THRESHOLD = 100
 const ACTIVE_SUBSET_OF_NODES = 4
 
 let coreServerPort

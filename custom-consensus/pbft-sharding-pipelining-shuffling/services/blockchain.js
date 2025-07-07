@@ -154,23 +154,6 @@ class Blockchain {
 
   // get shard rate of blocks and transactions
   getRate() {
-    // Infinite round change issue -> run it only on success
-
-    // Unassigned processing issue -> run on timeout in case of idle traffic, release assigned transactions after timeout in case of faults
-    
-    // ....
-
-    // No blocks are created!
-
-    // faulty = record errors, rates = cpu utilization
- 
-    // Then introduce faulty nodes
-
-    // Then run shuffling
-
-    // Then distance tree sort
-
-    // Then pass traffic to other shards
     const previousMinute = RateUtility.getPreviousMinute()
     const currentShardTransactionsRate = RateUtility.getRatePerMin(this.transactionPool?.ratePerMin, previousMinute);
     let currentShardBlocksRate;

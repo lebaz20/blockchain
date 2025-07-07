@@ -67,7 +67,7 @@ class P2pserver {
       const rate = this.blockchain.getRate();
       console.log(`RATE INTERVAL BROADCAST ${SUBSET_INDEX}`, JSON.stringify(rate));
       this.broadcastRateToCore(rate);
-    }, 30000); // every 1 minute
+    }, 60000); // every 1 minute
   }
 
   // connects to a given socket and registers the message handler on it
@@ -227,11 +227,11 @@ class P2pserver {
     });
   }
 
-  initiateBlockCreation() {
+  initiateBlockCreation(triggeredByTransaction = true) {
     this.lastTransactionCreatedAt = new Date();
     const thresholdReached = this.transactionPool.poolFull();
     // check if limit reached
-    if (thresholdReached) {
+    if (thresholdReached || !triggeredByTransaction) {
       console.log(
         P2P_PORT,
         "THRESHOLD REACHED, TOTAL NOW:",
@@ -250,9 +250,9 @@ class P2pserver {
       console.log(
         P2P_PORT,
         "PROPOSE BLOCK CONDITION",
-        this.blockchain.getProposer() == this.wallet.getPublicKey(),
-        readyToPropose,
-        this.transactionPool.getInflightBlocks(),
+        "is proposer:", this.blockchain.getProposer() == this.wallet.getPublicKey(),
+        "is ready to propose:", readyToPropose,
+        "inflight blocks:", this.transactionPool.getInflightBlocks(),
       );
       if (
         this.blockchain.getProposer() == this.wallet.getPublicKey() &&
@@ -271,11 +271,11 @@ class P2pserver {
           this.wallet,
           previousBlock,
         );
-        console.log(P2P_PORT, "CREATED BLOCK", {
+        console.log(P2P_PORT, "CREATED BLOCK", JSON.stringify({
           lastHash: block.lastHash,
           hash: block.hash,
           data: block.data,
-        });
+        }));
         // assign block transactions to the block
         // Release assignment after x time in case block creation doesn't succeed
         this.transactionPool.assignTransactions(block);
@@ -301,7 +301,7 @@ class P2pserver {
       now - this.lastTransactionCreatedAt >= 50 * 1000 /* 50 seconds */ && 
       this.transactionPool.transactions.unassigned.length > 0
       ) {
-      this.initiateBlockCreation();
+      this.initiateBlockCreation(false);
       }
     }, 1 * 60 * 1000); // 1 minute
   }

@@ -32,7 +32,7 @@ class TransactionPool {
 
     const hash = block.hash;
     this.transactions[hash] = assignedTransactions;
-    this.transactionsCreatedAt[hash] = new Date.now();
+    this.transactionsCreatedAt[hash] = Date.now();
 
     setTimeout(() => {
       // remove the block hash after 2 minutes
