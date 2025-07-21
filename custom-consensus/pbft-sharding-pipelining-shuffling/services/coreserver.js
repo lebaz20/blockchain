@@ -1,8 +1,6 @@
 // import the ws module
 const WebSocket = require("ws");
 const MESSAGE_TYPE = require("../constants/message");
-const axios = require('axios')
-const { spawn } = require('child_process')
 
 class Coreserver {
   constructor(port, blockchain) {
@@ -110,66 +108,6 @@ class Coreserver {
           break;
       }
     });
-  }
-
-  shuffleArray(array) {
-    const copy = array.slice(); // don't modify original
-    for (let index = copy.length - 1; index > 0; index--) {
-      const index_ = Math.floor(Math.random() * (index + 1));
-      [copy[index], copy[index_]] = [copy[index_], copy[index]]; // swap
-    }
-    return copy;
-  }
-
-  splitIntoFoursWithRemaining(array) {
-    const result = [];
-    let index = 0;
-
-    while (array.length - index >= 4) {
-      result.push(array.slice(index, index + 4));
-      index += 4;
-    }
-
-    // Last group with remaining 4 or more
-    result[result.length - 1] = [...result[result.length - 1], ...array.slice(index)];
-
-    return result;
-  }
-
-  getRandomIndicesArrays(array) {
-    const indices = Array.from({ length: array.length }, (_, index) => index);
-    return this.splitIntoFoursWithRemaining(this.shuffleArray(indices));
-  }
-
-  waitForWebServer(url, retryInterval = 1000) {
-    return new Promise((resolve) => {
-      function checkWebServer() {
-        axios
-          .get(url + '/health')
-          .then(() => {
-            console.log(`WebServer is open: ${url}`)
-            resolve(true)
-            return true
-          })
-          .catch(() => {
-            // console.log(`WebServer ${url} not available, retrying...`);
-            setTimeout(checkWebServer, retryInterval + 1000)
-          })
-      }
-  
-      checkWebServer()
-    })
-  }
-
-  initP2pServer(environment) {
-    const serverProcess = spawn('node', ['app.js'], {
-      stdio: 'inherit',
-      env: environment
-    })
-  
-    serverProcess.on('close', (code) => {
-      console.log(`Server exited with code ${code}`)
-    })
   }
 }
 

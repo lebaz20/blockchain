@@ -1,6 +1,7 @@
 // import the ws module
 const WebSocket = require("ws");
 const fs = require("fs");
+const axios = require('axios');
 const MESSAGE_TYPE = require("../constants/message");
 
 // Create a write stream to your desired log file
@@ -79,8 +80,33 @@ class P2pserver {
     }
   }
 
+  waitForWebServer(url, retryInterval = 1000) {
+    return new Promise((resolve) => {
+      function checkWebServer() {
+        axios
+          .get(url + '/health')
+          .then(() => {
+            console.log(`WebServer is open: ${url}`)
+            resolve(true)
+            return true
+          })
+          .catch(() => {
+            // console.log(`WebServer ${url} not available, retrying...`);
+            setTimeout(checkWebServer, retryInterval + 1000)
+          })
+      }
+  
+      checkWebServer()
+    })
+  }
+
   // connects to the peers passed in command line
-  connectToPeers() {
+  async connectToPeers() {
+    await Promise.all(
+      peers.map((peer) =>
+        this.waitForWebServer(peer.replace('ws', 'http').replace('500', '300'))
+      )
+    );
     peers.forEach((peer) => {
       const socket = new WebSocket(peer);
       socket.on("open", () => {
@@ -93,17 +119,24 @@ class P2pserver {
     });
   }
 
-  connectToCore() {
-    const socket = new WebSocket(
+  async connectToCore() {
+    const connectCore = () => {
+      const socket = new WebSocket(
       `${core}?port=${P2P_PORT}&subsetIndex=${SUBSET_INDEX}`,
-    );
-    socket.on("open", () => {
+      );
+      socket.on("error", (error) => {
+      console.error(`Failed to connect to core: ${error.message}. Retrying in 5s...`);
+      setTimeout(connectCore, 5000);
+      });
+      socket.on("open", () => {
       console.log(
         `new connection from inside ${P2P_PORT} to ${core.split(":")[2]}`,
       );
       this.connectSocket(socket, true);
       this.messageHandler(socket, true);
-    });
+      });
+    };
+    connectCore();
   }
 
   // broadcasts transactions
