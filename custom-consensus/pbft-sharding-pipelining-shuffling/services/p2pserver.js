@@ -104,7 +104,7 @@ class P2pserver {
   async connectToPeers() {
     await Promise.all(
       peers.map((peer) =>
-        this.waitForWebServer(peer.replace('ws', 'http').replace('500', '300'))
+        this.waitForWebServer(peer.replace('ws', 'http').replace(':5', ':3'))
       )
     );
     peers.forEach((peer) => {

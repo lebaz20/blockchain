@@ -20,7 +20,7 @@ console.error = function (...arguments_) {
 // sudo sysctl -w kern.maxfiles=1228800
 // sudo sysctl -w kern.maxfilesperproc=614400
 // for port in {3001..3032}; do lsof -ti tcp:$port; done | xargs -r kill -9
-const NUMBER_OF_NODES = 8
+const NUMBER_OF_NODES = Number(process.env.NUMBER_OF_NODES)
 const TRANSACTION_THRESHOLD = 100
 const ACTIVE_SUBSET_OF_NODES = 4
 
@@ -66,7 +66,7 @@ const kubeFile = 'kubeConfig.yml';
 nodesSubsets.forEach((nodesSubset, subsetIndex) => {
   console.log(
     'Subset PBFT nodes:',
-    nodesSubset.map((index) => '500' + (parseInt(index, 10) + 1))
+    nodesSubset.map((index) => parseInt(index, 10) + 5001)
   )
   for (let index = 0; index < NUMBER_OF_NODES; index++) {
     const environmentVariables = {
@@ -84,7 +84,7 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
     if (index > 0) {
       const peers = Array.from(
         { length: index },
-        (_, index_) => `ws://p2p-server-${index_}.p2p-server:500${index_ + 1}`
+        (_, index_) => `ws://p2p-server-${index_}.p2p-server:${index_ + 5001}`
       )
       let peersSubset = []
       nodesSubset.forEach((index) => {
@@ -103,6 +103,8 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
     }
   }
 })
+
+environmentArray.sort((a, b) => a.HTTP_PORT - b.HTTP_PORT)
 
 fs.writeFileSync(environmentFile, yaml.dump(environmentArray))
 
@@ -145,7 +147,7 @@ const k8sConfig = {
       apiVersion: 'v1',
       kind: 'Service',
       metadata: {
-        name: 'p2p-server',
+        name: `p2p-server-${index}`,
         labels: { app: 'p2p-server', domain: 'blockchain' }
       },
       spec: {
@@ -155,16 +157,16 @@ const k8sConfig = {
         },
         ports: [
           {
-            name: 'ws',
+            name: environmentVariables.P2P_PORT.toString(),
             protocol: 'TCP',
             port: environmentVariables.P2P_PORT ? Number(environmentVariables.P2P_PORT) : 5001,
             targetPort: environmentVariables.P2P_PORT ? Number(environmentVariables.P2P_PORT) : 5001
           },
           {
-            name: 'http',
+            name: environmentVariables.HTTP_PORT.toString(),
             protocol: 'TCP',
             port: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001,
-            targetPort: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001
+            targetPort: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001,
           }
         ]
       }
@@ -203,11 +205,13 @@ const k8sConfig = {
         labels: { app: 'core-server', domain: 'blockchain' }
       },
       spec: {
+        clusterIP: 'None',
         selector: {
           app: 'core-server'
         },
         ports: [
           {
+            name: coreServerPort.toString(),
             protocol: 'TCP',
             port: coreServerPort,
             targetPort: coreServerPort

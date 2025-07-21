@@ -11,7 +11,8 @@ docker push lebaz20/blockchain-p2p-server:latest
 docker push lebaz20/blockchain-core-server:latest
 
 # Run prepare-config.js locally (not inside Docker)
-node prepare-config.js
+NUMBER_OF_NODES=16
+NUMBER_OF_NODES=$NUMBER_OF_NODES node prepare-config.js
 
 sleep 2
 
@@ -29,5 +30,9 @@ while true; do
     sleep 2
 done
 echo "All pods are running."
+
+for ((i=0; i<NUMBER_OF_NODES; i++)); do
+  kubectl port-forward pod/p2p-server-$i $((3001+i)):$((3001+i)) &
+done
 
 kubectl logs -l domain=blockchain -f --max-log-requests=10000

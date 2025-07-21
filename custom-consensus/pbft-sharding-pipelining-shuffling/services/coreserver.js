@@ -14,6 +14,7 @@ class Coreserver {
   // Creates a server on a given port
   listen() {
     const server = new WebSocket.Server({ port: this.port });
+    console.log(`Listening on port ${this.port}`);
     server.on("connection", (socket, request) => {
       const parsedUrl = new URL(request.url, `http://${request.headers.host}`);
       const subsetIndex = parsedUrl.searchParams.get("subsetIndex");
