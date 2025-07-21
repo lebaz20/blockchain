@@ -112,7 +112,7 @@ const k8sConfig = {
   items: [
     ...environmentArray.flatMap((environmentVariables, index) => ([{
       apiVersion: 'v1',
-      kind: 'Service',
+      kind: 'Pod',
       metadata: {
         name: `p2p-server-${index}`,
         labels: { app: 'p2p-server', domain: 'blockchain' }
@@ -149,19 +149,20 @@ const k8sConfig = {
         labels: { app: 'p2p-server', domain: 'blockchain' }
       },
       spec: {
-        // eslint-disable-next-line no-undef
-        clusterIP: None,
+        clusterIP: 'None',
         selector: {
           app: 'p2p-server'
         },
         ports: [
           {
+            name: 'ws',
             protocol: 'TCP',
             port: environmentVariables.P2P_PORT ? Number(environmentVariables.P2P_PORT) : 5001,
             targetPort: environmentVariables.P2P_PORT ? Number(environmentVariables.P2P_PORT) : 5001
           },
           {
-            protocol: 'HTTP',
+            name: 'http',
+            protocol: 'TCP',
             port: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001,
             targetPort: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001
           }

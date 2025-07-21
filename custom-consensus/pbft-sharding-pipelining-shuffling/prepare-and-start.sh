@@ -2,13 +2,13 @@
 
 set -e
 
-# Build the Docker image
-docker build -f Dockerfile.p2p -t lebaz20/blockchain-p2p-server:latest .
-docker build -f Dockerfile.core -t lebaz20/blockchain-core-server:latest .
+# # Build the Docker image
+# docker build -f Dockerfile.p2p -t lebaz20/blockchain-p2p-server:latest .
+# docker build -f Dockerfile.core -t lebaz20/blockchain-core-server:latest .
 
-# Push the Docker image to the local registry
-docker push lebaz20/blockchain-p2p-server:latest
-docker push lebaz20/blockchain-core-server:latest
+# # Push the Docker image to the local registry
+# docker push lebaz20/blockchain-p2p-server:latest
+# docker push lebaz20/blockchain-core-server:latest
 
 # Run prepare-config.js locally (not inside Docker)
 node prepare-config.js
