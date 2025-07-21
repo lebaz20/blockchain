@@ -78,13 +78,13 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
       NUMBER_OF_NODES: ACTIVE_SUBSET_OF_NODES,
       NODES_SUBSET: JSON.stringify(nodesSubset),
       SUBSET_INDEX: `SUBSET${subsetIndex + 1}`,
-      CORE: `ws://localhost:${coreServerPort}`
+      CORE: `ws://core-server:${coreServerPort}`
     }
 
     if (index > 0) {
       const peers = Array.from(
         { length: index },
-        (_, index_) => `ws://localhost:500${index_ + 1}`
+        (_, index_) => `ws://p2p-server-${index_}.p2p-server:500${index_ + 1}`
       )
       let peersSubset = []
       nodesSubset.forEach((index) => {
@@ -110,9 +110,9 @@ const k8sConfig = {
   apiVersion: 'v1',
   kind: 'List',
   items: [
-    ...environmentArray.map((environmentVariables, index) => ({
+    ...environmentArray.flatMap((environmentVariables, index) => ([{
       apiVersion: 'v1',
-      kind: 'Pod',
+      kind: 'Service',
       metadata: {
         name: `p2p-server-${index}`,
         labels: { app: 'p2p-server', domain: 'blockchain' }
@@ -140,7 +140,34 @@ const k8sConfig = {
         ],
         restartPolicy: 'Never'
       }
-    })),
+    },
+  {
+      apiVersion: 'v1',
+      kind: 'Service',
+      metadata: {
+        name: 'p2p-server',
+        labels: { app: 'p2p-server', domain: 'blockchain' }
+      },
+      spec: {
+        // eslint-disable-next-line no-undef
+        clusterIP: None,
+        selector: {
+          app: 'p2p-server'
+        },
+        ports: [
+          {
+            protocol: 'TCP',
+            port: environmentVariables.P2P_PORT ? Number(environmentVariables.P2P_PORT) : 5001,
+            targetPort: environmentVariables.P2P_PORT ? Number(environmentVariables.P2P_PORT) : 5001
+          },
+          {
+            protocol: 'HTTP',
+            port: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001,
+            targetPort: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001
+          }
+        ]
+      }
+    }])),
     {
       apiVersion: 'v1',
       kind: 'Pod',
@@ -166,7 +193,27 @@ const k8sConfig = {
         ],
         restartPolicy: 'Never'
       }
-    }
+    },
+    {
+      apiVersion: 'v1',
+      kind: 'Service',
+      metadata: {
+        name: 'core-server',
+        labels: { app: 'core-server', domain: 'blockchain' }
+      },
+      spec: {
+        selector: {
+          app: 'core-server'
+        },
+        ports: [
+          {
+            protocol: 'TCP',
+            port: coreServerPort,
+            targetPort: coreServerPort
+          }
+        ]
+      }
+    },
   ]
 };
 fs.writeFileSync(kubeFile, yaml.dump(k8sConfig));

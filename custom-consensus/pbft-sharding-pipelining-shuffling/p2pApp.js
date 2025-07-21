@@ -73,7 +73,7 @@ app.post("/transaction", async (request, response) => {
     try {
       const redirectResponse = await axios({
         method: request.method,
-        url: `http://localhost:${REDIRECT_TO_PORT}/transaction`,
+        url: `${REDIRECT_TO_PORT}/transaction`,
         // headers: req.headers,
         data: request.body,
       });
