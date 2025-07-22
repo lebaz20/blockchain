@@ -20,6 +20,9 @@ const MIN_APPROVALS = 2 * (NUMBER_OF_NODES / 3) + 1;
 // SUBSET INDEX
 const SUBSET_INDEX = process.env.SUBSET_INDEX ?? "SUBSET1";
 
+// CPU limit for each node in the network
+const CPU_LIMIT = process.env.CPU_LIMIT ?? "1";
+
 module.exports = {
   TRANSACTION_THRESHOLD,
   NUMBER_OF_NODES,
@@ -27,4 +30,5 @@ module.exports = {
   MIN_APPROVALS,
   SUBSET_INDEX,
   NODES_SUBSET,
+  CPU_LIMIT
 };

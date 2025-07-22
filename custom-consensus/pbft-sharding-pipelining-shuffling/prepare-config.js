@@ -23,6 +23,7 @@ console.error = function (...arguments_) {
 const NUMBER_OF_NODES = Number(process.env.NUMBER_OF_NODES)
 const TRANSACTION_THRESHOLD = 100
 const ACTIVE_SUBSET_OF_NODES = 4
+const CPU_LIMIT = 0.001
 
 const coreServerPort = 4999
 
@@ -78,7 +79,8 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
       NUMBER_OF_NODES: ACTIVE_SUBSET_OF_NODES,
       NODES_SUBSET: JSON.stringify(nodesSubset),
       SUBSET_INDEX: `SUBSET${subsetIndex + 1}`,
-      CORE: `ws://core-server:${coreServerPort}`
+      CORE: `ws://core-server:${coreServerPort}`,
+      CPU_LIMIT,
     }
 
     if (index > 0) {
@@ -108,6 +110,8 @@ environmentArray.sort((a, b) => a.HTTP_PORT - b.HTTP_PORT)
 
 fs.writeFileSync(environmentFile, yaml.dump(environmentArray))
 
+const memory = '64Mi';
+const cpu = `${Number(CPU_LIMIT) * 1000}m`;
 const k8sConfig = {
   apiVersion: 'v1',
   kind: 'List',
@@ -126,8 +130,8 @@ const k8sConfig = {
             image: 'lebaz20/blockchain-p2p-server:latest',
             resources: {
               limits: {
-                memory: '128Mi',
-                cpu: '100m'
+                memory,
+                cpu
               }
             },
             env: Object.entries(environmentVariables).map(([key, value]) => ({
@@ -185,8 +189,8 @@ const k8sConfig = {
             image: 'lebaz20/blockchain-core-server:latest',
             resources: {
               limits: {
-                memory: '128Mi',
-                cpu: '100m'
+                memory,
+                cpu
               }
             },
             ports: [
