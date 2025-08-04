@@ -100,12 +100,13 @@ class Coreserver {
             !this.rates[data.rate.shardIndex] || this.rates[data.rate.shardIndex].transactions < data.rate.transactions[data.rate.shardIndex]
           ) {
             this.rates[data.rate.shardIndex] = {
-              transactions: data.rate.transactions[data.rate.shardIndex],
-              blocks: data.rate.blocks[data.rate.shardIndex],
-              shardStatus: data.rate.shardStatus 
+              transactions: data.rate.transactions?.[data.rate.shardIndex],
+              blocks: data.rate.blocks?.[data.rate.shardIndex],
+              shardStatus: data.rate.shardStatus
             };
           }
-          console.log(`CORE STATS:`, JSON.stringify(this.rates));
+          console.log(`CORE RATE:`, JSON.stringify(this.rates));
+          console.log(`CORE TOTAL:`, JSON.stringify(data.total));
           break;
       }
     });

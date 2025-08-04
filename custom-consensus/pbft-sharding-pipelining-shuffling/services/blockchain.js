@@ -4,6 +4,7 @@ const { NODES_SUBSET, NUMBER_OF_NODES, SUBSET_INDEX, TRANSACTION_THRESHOLD } = r
 // Used to verify block
 const Block = require("./block");
 const RateUtility = require("../utils/rate");
+const { readCgroupCPUPercentPromise } = require("../utils/cpu");
 const { SHARD_STATUS } = require("../constants/status");
 
 class Blockchain {
@@ -153,7 +154,8 @@ class Blockchain {
   }
 
   // get shard rate of blocks and transactions
-  getRate() {
+  async getRate() {
+    const cpuPercentage = await readCgroupCPUPercentPromise();
     const previousMinute = RateUtility.getPreviousMinute()
     const currentShardTransactionsRate = RateUtility.getRatePerMin(this.transactionPool?.ratePerMin, previousMinute);
     let currentShardBlocksRate;
@@ -174,20 +176,22 @@ class Blockchain {
     const currentShardProcessedTransactionsPeakRate = currentShardBlocksRate * TRANSACTION_THRESHOLD + TRANSACTION_THRESHOLD;
     let shardStatus = SHARD_STATUS.normal;
     // transaction rate less than threshold needed for a single block or less than a lower-bound threshold or no transactions at all
-    if (!currentShardTransactionsRate || currentShardTransactionsRate < TRANSACTION_THRESHOLD || currentShardTransactionsRate < 20) {
+    if (cpuPercentage < 20) {
       shardStatus = SHARD_STATUS.under_utilized;
       // didn't build a single block or transaction rate is more than double the produced blocks rate
       // TODO: track failed consensus attempts
     } else if (!currentShardBlocksRate || currentShardTransactionsRate > currentShardProcessedTransactionsPeakRate * 2) {
       shardStatus = SHARD_STATUS.faulty;
       // transaction rate is more than the peak rate of processed transactions by a margin
-    } else if (currentShardBlocksRate > 0 && currentShardTransactionsRate > currentShardProcessedTransactionsPeakRate * 1.2) {
+    } else if (cpuPercentage > 70) {
       shardStatus = SHARD_STATUS.over_utilized;
+      // transaction rate less than threshold needed for a single block or less than a lower-bound threshold or no transactions at all
     }
 
     rate.shardStatus = shardStatus;
     rate.nodeIndex = `NODE${process.env.HTTP_PORT.slice(1)}`;
     rate.shardIndex = SUBSET_INDEX;
+    rate.cpu = `${cpuPercentage.toString()}%`;
     return rate;
   }
 }

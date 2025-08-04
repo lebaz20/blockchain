@@ -7,4 +7,4 @@ RUN yarn install --frozen-lockfile
 
 COPY . .
 
-CMD ["node", "p2pApp.js"]
+CMD ["node", "appP2p.js"]

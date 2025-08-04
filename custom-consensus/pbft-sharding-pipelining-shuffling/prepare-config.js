@@ -227,3 +227,15 @@ const k8sConfig = {
 };
 fs.writeFileSync(kubeFile, yaml.dump(k8sConfig));
 
+const ports = environmentArray.map(environment => environment.HTTP_PORT);
+const weights = ports.map(() => Math.floor(Math.random() * 10) + 1); // random weight 1-10
+
+let weightedPorts = [];
+ports.forEach((endpoint, index) => {
+  for (let w = 0; w < weights[index]; w++) {
+    weightedPorts.push(endpoint);
+  }
+});
+
+// Write weighted ports to CSV for JMeter
+fs.writeFileSync('jmeter_ports.csv', weightedPorts.join('\n'));
