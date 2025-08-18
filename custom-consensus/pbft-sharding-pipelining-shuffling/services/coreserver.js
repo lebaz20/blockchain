@@ -1,6 +1,7 @@
 // import the ws module
 const WebSocket = require("ws");
 const MESSAGE_TYPE = require("../constants/message");
+const { SHARD_STATUS } = require("../constants/status");
 
 class Coreserver {
   constructor(port, blockchain) {
@@ -19,19 +20,23 @@ class Coreserver {
       const parsedUrl = new URL(request.url, `http://${request.headers.host}`);
       const subsetIndex = parsedUrl.searchParams.get("subsetIndex");
       const port = parsedUrl.searchParams.get("port");
-      this.connectSocket(socket, port, subsetIndex);
+      const httpPort = parsedUrl.searchParams.get("httpPort");
+      this.connectSocket(socket, port, subsetIndex, httpPort);
       this.messageHandler(socket);
       console.log("core sockets", JSON.stringify(this.socketsMap));
     });
   }
 
   // connects to a given socket and registers the message handler on it
-  connectSocket(socket, port, subsetIndex) {
+  connectSocket(socket, port, subsetIndex, httpPort) {
     if (!this.sockets[subsetIndex]) {
       this.sockets[subsetIndex] = {};
       this.socketsMap[subsetIndex] = [];
     }
-    this.sockets[subsetIndex][port] = socket;
+    this.sockets[subsetIndex][port] = {
+      socket,
+      url: `http://p2p-server-${Number(port) - 5001}:${httpPort}`,
+    };
     this.socketsMap[subsetIndex].push(port);
   }
 
@@ -41,7 +46,7 @@ class Coreserver {
       .filter((socketSubsetIndex) => socketSubsetIndex != subsetIndex)
       .forEach((socketSubsetIndex) => {
         Object.keys(this.sockets[socketSubsetIndex]).forEach((socketPort) => {
-          const socket = this.sockets[socketSubsetIndex][socketPort];
+          const socket = this.sockets[socketSubsetIndex][socketPort].socket;
           sockets.push(socket);
         });
       });
@@ -63,6 +68,28 @@ class Coreserver {
         type: MESSAGE_TYPE.block_from_core,
         block,
         subsetIndex,
+      }),
+    );
+  }
+
+  getSubset(subsetIndex) {
+    return Object.values(this.sockets[subsetIndex]);
+  }
+
+  // update config
+  updateConfig(config, subsetIndex) {
+    const sockets = this.getSubset(subsetIndex);
+    sockets.forEach(({ socket }) => {
+      this.sendConfig(socket, config);
+    });
+  }
+
+  // sends config to a particular socket
+  sendConfig(socket, config) {
+    socket.send(
+      JSON.stringify({
+        type: MESSAGE_TYPE.config_from_core,
+        config,
       }),
     );
   }
@@ -104,6 +131,60 @@ class Coreserver {
               blocks: data.rate.blocks?.[data.rate.shardIndex],
               shardStatus: data.rate.shardStatus
             };
+            const shardStatusMap = {};
+            Object.values(SHARD_STATUS).forEach((status) => {
+              shardStatusMap[status] = Object.entries(this.rates)
+              .filter(([, rate]) => rate.shardStatus === status)
+              .map(([shardIndex]) => shardIndex);
+            });
+            // Build mapping for faulty shards
+            const faultyShards = shardStatusMap[SHARD_STATUS.faulty] || [];
+            const underUtilizedShards = shardStatusMap[SHARD_STATUS.under_utilized] || [];
+            const normalShards = shardStatusMap[SHARD_STATUS.normal] || [];
+            const overUtilizedShards = shardStatusMap[SHARD_STATUS.over_utilized] || [];
+
+            const assignedIndices = new Set();
+            const faultyShardRedirectAssignment = {};
+
+            faultyShards.forEach((faultyShardIndex) => {
+              let candidates = underUtilizedShards.filter(index => !assignedIndices.has(index));
+              let status = SHARD_STATUS.under_utilized;
+              if (candidates.length === 0) {
+              candidates = normalShards.filter(index => !assignedIndices.has(index));
+              status = SHARD_STATUS.normal;
+              }
+              if (candidates.length === 0) {
+              candidates = overUtilizedShards.filter(index => !assignedIndices.has(index));
+              status = SHARD_STATUS.over_utilized;
+              }
+              if (candidates.length > 0) {
+              const randomIndex = Math.floor(Math.random() * candidates.length);
+              const selected = candidates[randomIndex];
+              assignedIndices.add(selected);
+              faultyShardRedirectAssignment[faultyShardIndex] = { redirectSubset: selected, status };
+              }
+            });
+
+            // faultyShardRedirectAssignment now contains mapping: { faultyShardIndex: { redirectSubset: mappedIndex, status: mappedStatus } }
+            Object.entries(faultyShardRedirectAssignment).forEach(([faultyShardIndex, { redirectSubset }]) => {
+              // Collect all URLs in the redirectSubset
+              let redirectUrls = [];
+              if (this.sockets[redirectSubset]) {
+                redirectUrls = Object.values(this.sockets[redirectSubset]).map(object => object.url);
+                const config = [{
+                  key: 'REDIRECT_TO_URL',
+                  value: redirectUrls,
+                }];
+                this.updateConfig(config, faultyShardIndex);
+              }
+            });
+            [ ...underUtilizedShards, ...normalShards, ...overUtilizedShards].forEach((shardIndex) => {
+              const config = [{
+                key: 'REDIRECT_TO_URL',
+                value: [],
+              }];
+              this.updateConfig(config, shardIndex);
+            });
           }
           console.log(`CORE RATE:`, JSON.stringify(this.rates));
           console.log(`CORE TOTAL:`, JSON.stringify(data.total));

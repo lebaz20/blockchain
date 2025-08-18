@@ -46,10 +46,10 @@
         <ConstantThroughputTimer guiclass="TestBeanGUI" testclass="ConstantThroughputTimer" testname="Constant Throughput Timer">
           <doubleProp>
             <name>throughput</name>
-            <value>10000.0</value>
+            <value>100000.0</value>
             <savedValue>0.0</savedValue>
           </doubleProp>
-          <intProp name="calcMode">2</intProp>
+          <intProp name="calcMode">0</intProp>
         </ConstantThroughputTimer>
         <hashTree/>
         <ResultCollector guiclass="ViewResultsFullVisualizer" testclass="ResultCollector" testname="View Results Tree">
@@ -127,7 +127,7 @@
           <boolProp name="useGroupName">true</boolProp>
         </ResultCollector>
         <hashTree/>
-        <ResultCollector guiclass="GraphVisualizer" testclass="ResultCollector" testname="Graph Results" enabled="true">
+        <ResultCollector guiclass="GraphVisualizer" testclass="ResultCollector" testname="Graph Results">
           <boolProp name="ResultCollector.error_logging">false</boolProp>
           <objProp>
             <name>saveConfig</name>
@@ -165,7 +165,7 @@
         </ResultCollector>
         <hashTree/>
       </hashTree>
-      <CSVDataSet guiclass="TestBeanGUI" testclass="CSVDataSet" testname="CSV Data Set Config">
+      <CSVDataSet guiclass="TestBeanGUI" testclass="CSVDataSet" testname="CSV Data Set Config" enabled="true">
         <stringProp name="filename">/Users/mohamedlabib/www/blockchain/custom-consensus/pbft-sharding-pipelining-shuffling/jmeter_ports.csv</stringProp>
         <stringProp name="fileEncoding"></stringProp>
         <stringProp name="variableNames">weightedPort</stringProp>

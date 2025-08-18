@@ -1,11 +1,12 @@
 // Import total number of nodes used to create validators list
-const { NODES_SUBSET, NUMBER_OF_NODES, SUBSET_INDEX, TRANSACTION_THRESHOLD } = require("../config");
+const config = require("../config");
 
 // Used to verify block
 const Block = require("./block");
 const RateUtility = require("../utils/rate");
 const { readCgroupCPUPercentPromise } = require("../utils/cpu");
 const { SHARD_STATUS } = require("../constants/status");
+const { NODES_SUBSET, NUMBER_OF_NODES_PER_SHARD, SUBSET_INDEX, TRANSACTION_THRESHOLD } = config.get();
 
 class Blockchain {
   // the constructor takes an argument validators class object
@@ -56,8 +57,11 @@ class Blockchain {
     const index =
       this.chain[SUBSET_INDEX][
         (blocksCount ?? this.chain[SUBSET_INDEX].length) - 1
-      ].hash[0].charCodeAt(0) % NUMBER_OF_NODES;
-    return this.validatorList[index];
+      ].hash[0].charCodeAt(0) % NUMBER_OF_NODES_PER_SHARD;
+    return {
+      proposer: this.validatorList[index],
+      proposerIndex: NODES_SUBSET[index],
+    };
   }
 
   // checks if the received block is valid
@@ -70,7 +74,7 @@ class Blockchain {
       block.lastHash === lastBlock.hash &&
       block.hash === Block.blockHash(block) &&
       Block.verifyBlock(block) &&
-      Block.verifyProposer(block, this.getProposer(blocksCount))
+      Block.verifyProposer(block, this.getProposer(blocksCount).proposer)
     ) {
       console.log("BLOCK VALID");
       return true;
@@ -82,7 +86,7 @@ class Blockchain {
         block.lastHash === lastBlock.hash,
         block.hash === Block.blockHash(block),
         Block.verifyBlock(block),
-        Block.verifyProposer(block, this.getProposer(blocksCount)),
+        Block.verifyProposer(block, this.getProposer(blocksCount).proposer),
       );
       console.log("BLOCK INVALID");
       return false;
@@ -148,6 +152,7 @@ class Blockchain {
           (sum, block) => sum + block.data.length,
           0,
         ),
+        unassignedTransactions: this.transactionPool?.transactions.unassigned.length
       };
     });
     return total;
@@ -189,6 +194,7 @@ class Blockchain {
     }
 
     rate.shardStatus = shardStatus;
+    // rate.shardStatus = SUBSET_INDEX === 'SUBSET1' ? SHARD_STATUS.faulty : SHARD_STATUS.normal;
     rate.nodeIndex = `NODE${process.env.HTTP_PORT.slice(1)}`;
     rate.shardIndex = SUBSET_INDEX;
     rate.cpu = `${cpuPercentage.toString()}%`;

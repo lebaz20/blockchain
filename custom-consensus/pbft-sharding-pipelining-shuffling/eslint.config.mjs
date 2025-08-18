@@ -33,6 +33,7 @@ export default defineConfig([
       'sonarjs/no-small-switch': 'off',
       'sonarjs/pseudo-random': 'off',
       'sonarjs/no-os-command-from-path': 'off',
+      'sonarjs/cognitive-complexity': 'off',
       'unicorn/prevent-abbreviations': [
         'error',
         {

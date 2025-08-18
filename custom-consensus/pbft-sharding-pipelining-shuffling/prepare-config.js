@@ -21,9 +21,10 @@ console.error = function (...arguments_) {
 // sudo sysctl -w kern.maxfilesperproc=614400
 // for port in {3001..3032}; do lsof -ti tcp:$port; done | xargs -r kill -9
 const NUMBER_OF_NODES = Number(process.env.NUMBER_OF_NODES)
-const TRANSACTION_THRESHOLD = 100
-const ACTIVE_SUBSET_OF_NODES = 4
-const CPU_LIMIT = 0.001
+const TRANSACTION_THRESHOLD = Number(process.env.TRANSACTION_THRESHOLD)
+const NUMBER_OF_FAULTY_NODES = Number(process.env.NUMBER_OF_FAULTY_NODES)
+const NUMBER_OF_NODES_PER_SHARD = Number(process.env.NUMBER_OF_NODES_PER_SHARD)
+const CPU_LIMIT = Number(process.env.CPU_LIMIT)
 
 const coreServerPort = 4999
 
@@ -36,16 +37,16 @@ const shuffleArray = (array) => {
   return copy;
 }
 
-const splitIntoFoursWithRemaining = (array) => {
+const splitIntoShardsWithRemaining = (array) => {
   const result = [];
   let index = 0;
 
-  while (array.length - index >= 4) {
-    result.push(array.slice(index, index + 4));
-    index += 4;
+  while (array.length - index >= NUMBER_OF_NODES_PER_SHARD) {
+    result.push(array.slice(index, index + NUMBER_OF_NODES_PER_SHARD));
+    index += NUMBER_OF_NODES_PER_SHARD;
   }
 
-  // Last group with remaining 4 or more
+  // Last group with remaining nodes
   result[result.length - 1] = [...result[result.length - 1], ...array.slice(index)];
 
   return result;
@@ -53,10 +54,15 @@ const splitIntoFoursWithRemaining = (array) => {
 
 const getRandomIndicesArrays = (array) => {
   const indices = Array.from({ length: array.length }, (_, index) => index);
-  return splitIntoFoursWithRemaining(shuffleArray(indices));
+  const shuffledArray = shuffleArray(indices);
+  const faultyNodes = shuffleArray(shuffledArray).slice(0, NUMBER_OF_FAULTY_NODES);
+  return {
+    shards: splitIntoShardsWithRemaining(shuffledArray),
+    faultyNodes
+  };
 }
 
-const nodesSubsets = getRandomIndicesArrays(
+const { shards: nodesSubsets, faultyNodes } = getRandomIndicesArrays(
   Array.from({ length: NUMBER_OF_NODES }, (_, index) => index)
 )
 console.log(nodesSubsets)
@@ -73,10 +79,11 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
     const environmentVariables = {
       // ...process.env, // Keep existing environment variables
       SECRET: `NODE${index}`,
+      IS_FAULTY: faultyNodes.includes(index),
       P2P_PORT: 5001 + index,
       HTTP_PORT: 3001 + index,
       TRANSACTION_THRESHOLD,
-      NUMBER_OF_NODES: ACTIVE_SUBSET_OF_NODES,
+      NUMBER_OF_NODES_PER_SHARD: NUMBER_OF_NODES_PER_SHARD,
       NODES_SUBSET: JSON.stringify(nodesSubset),
       SUBSET_INDEX: `SUBSET${subsetIndex + 1}`,
       CORE: `ws://core-server:${coreServerPort}`,
@@ -86,7 +93,7 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
     if (index > 0) {
       const peers = Array.from(
         { length: index },
-        (_, index_) => `ws://p2p-server-${index_}.p2p-server:${index_ + 5001}`
+        (_, index_) => `ws://p2p-server-${index_}:${index_ + 5001}`
       )
       let peersSubset = []
       nodesSubset.forEach((index) => {

@@ -1,5 +1,6 @@
 const fs = require('fs');
-const { CPU_LIMIT } = require("../config");
+const config = require("../config");
+const { CPU_LIMIT } = config.get();
 
 const readCgroupCPUPercentPromise = (interval = 1000) => {
   const usagePathV1 = '/sys/fs/cgroup/cpuacct/cpuacct.usage';
@@ -36,6 +37,7 @@ const readCgroupCPUPercentPromise = (interval = 1000) => {
       startUsage = getUsage(usagePath, isV2);
       startTime = process.hrtime.bigint();
     } catch (error) {
+      console.error('Error reading cgroup cpu usage:', error);
       return reject('Error reading cgroup cpu usage: ' + error.message);
     }
 
@@ -78,6 +80,7 @@ const readCgroupCPUPercentPromise = (interval = 1000) => {
 
         resolve(Number(cpuPercentOfLimit)); // returns percentage as number
       } catch (error) {
+        console.error('Error reading cgroup cpu usage:', error);
         reject('Error reading cgroup cpu usage: ' + error.message);
       }
     }, interval);

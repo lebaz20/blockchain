@@ -41,6 +41,9 @@ class PreparePool {
 
   // checks if the block already exists
   isBlockPrepared(block, wallet) {
+    if (!block?.hash) {
+      return false;
+    }
     const prepare = this.createPrepare(block, wallet);
     return this.existingPrepare(prepare);
   }

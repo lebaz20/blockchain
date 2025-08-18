@@ -4,7 +4,8 @@ const RateUtility = require("../../utils/rate");
 
 // Transaction threshold is the limit or the holding capacity of the nodes
 // Once this exceeds a new block is generated
-const { TRANSACTION_THRESHOLD } = require("../../config");
+const config = require("../../config");
+const { TRANSACTION_THRESHOLD } = config.get();
 
 class TransactionPool {
   constructor() {

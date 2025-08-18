@@ -20,7 +20,8 @@ console.error = function (...arguments_) {
 
 // import the min approval constant which will be used to compare the count the messages
 // import active subset of nodes to use in validation
-const { MIN_APPROVALS, SUBSET_INDEX, TRANSACTION_THRESHOLD } = require("../config");
+const config = require("../config");
+const { NODES_SUBSET, MIN_APPROVALS, SUBSET_INDEX, TRANSACTION_THRESHOLD, IS_FAULTY } = config.get();
 
 // declare a p2p server port on which it would listen for messages
 // we will pass the port through command line
@@ -110,24 +111,33 @@ class P2pserver {
       )
     );
     peers.forEach((peer) => {
-      const socket = new WebSocket(peer);
-      socket.on("open", () => {
-        console.log(
-          `new connection from inside ${P2P_PORT} to ${peer.split(":")[2]}`,
+      const connectPeer = () => {
+        const socket = new WebSocket(
+        `${peer}?port=${P2P_PORT}&subsetIndex=${SUBSET_INDEX}&httpPort=${process.env.HTTP_PORT}`,
         );
-        this.connectSocket(socket);
-        this.messageHandler(socket);
-      });
+        socket.on("error", (error) => {
+          console.error(`Failed to connect to peer. Retrying in 5s...`, error);
+          setTimeout(connectPeer, 5000);
+        });
+        socket.on("open", () => {
+          console.log(
+            `new connection from inside ${P2P_PORT} to ${peer.split(":")[2]}`,
+          );
+          this.connectSocket(socket);
+          this.messageHandler(socket);
+        });
+      };
+      connectPeer();
     });
   }
 
   async connectToCore() {
     const connectCore = () => {
       const socket = new WebSocket(
-      `${core}?port=${P2P_PORT}&subsetIndex=${SUBSET_INDEX}`,
+      `${core}?port=${P2P_PORT}&subsetIndex=${SUBSET_INDEX}&httpPort=${process.env.HTTP_PORT}`,
       );
       socket.on("error", (error) => {
-      console.error(`Failed to connect to core: ${error.message}. Retrying in 5s...`);
+      console.error(`Failed to connect to core. Retrying in 5s...`, error);
       setTimeout(connectCore, 5000);
       });
       socket.on("open", () => {
@@ -267,7 +277,7 @@ class P2pserver {
     this.lastTransactionCreatedAt = new Date();
     const thresholdReached = this.transactionPool.poolFull();
     // check if limit reached
-    if (thresholdReached || !triggeredByTransaction) {
+    if (!IS_FAULTY && (thresholdReached || !triggeredByTransaction)) {
       console.log(
         P2P_PORT,
         "THRESHOLD REACHED, TOTAL NOW:",
@@ -283,15 +293,17 @@ class P2pserver {
           this.wallet,
         );
       }
+      const proposerObject = this.blockchain.getProposer();
       console.log(
         P2P_PORT,
         "PROPOSE BLOCK CONDITION",
-        "is proposer:", this.blockchain.getProposer() == this.wallet.getPublicKey(),
+        "proposer index:", proposerObject.proposerIndex, NODES_SUBSET,
+        "is proposer:", proposerObject.proposer == this.wallet.getPublicKey(),
         "is ready to propose:", readyToPropose,
         "inflight blocks:", this.transactionPool.getInflightBlocks(),
       );
       if (
-        this.blockchain.getProposer() == this.wallet.getPublicKey() &&
+        proposerObject.proposer == this.wallet.getPublicKey() &&
         readyToPropose &&
         this.transactionPool.getInflightBlocks().length <= 4
       ) {
@@ -334,18 +346,21 @@ class P2pserver {
       // If no new transaction has triggered initiateBlockCreation in the last 60s, call it manually
       if (
       this.lastTransactionCreatedAt &&
-      now - this.lastTransactionCreatedAt >= 50 * 1000 /* 50 seconds */ && 
+      now - this.lastTransactionCreatedAt >= 8 * 1000 /* 8 seconds */ && 
       this.transactionPool.transactions.unassigned.length > 0
       ) {
       this.initiateBlockCreation(false);
       }
-    }, 1 * 60 * 1000); // 1 minute
+    }, 1 * 10 * 1000); // 10 seconds
   }
 
   // parse message
   async parseMessage(data, isCore) {
     console.log(P2P_PORT, "RECEIVED", data.type);
 
+    if (IS_FAULTY && ![MESSAGE_TYPE.transaction].includes(data.type)) {
+      return;
+    }
     // select a particular message handler
     switch (data.type) {
       case MESSAGE_TYPE.transaction:
@@ -393,9 +408,11 @@ class P2pserver {
             data.previousBlock,
           );
 
-          // create and broadcast a prepare message
-          let prepare = this.preparePool.prepare(data.block, this.wallet);
-          this.broadcastPrepare(prepare);
+          if (data.block?.hash) {
+            // create and broadcast a prepare message
+            let prepare = this.preparePool.prepare(data.block, this.wallet);
+            this.broadcastPrepare(prepare);
+          }
         }
         break;
       case MESSAGE_TYPE.prepare:
@@ -533,6 +550,21 @@ class P2pserver {
             JSON.stringify(stats),
           );
         }
+        break;
+      
+      case MESSAGE_TYPE.config_from_core:
+        // update config from core
+        if (isCore === true) {
+          data.config.forEach((item) => {
+            config.set(item.key, item.value);
+          });
+          console.log(
+            P2P_PORT,
+            `CONFIG UPDATE FOR #${SUBSET_INDEX}:`,
+            JSON.stringify(data.config),
+          );
+        }
+        break;
     }
   }
 }
