@@ -43,7 +43,7 @@ class P2pserver {
     messagePool,
     validators,
   ) {
-    this.sockets = [];
+    this.sockets = {};
     this.wallet = wallet;
     this.blockchain = blockchain;
     this.transactionPool = transactionPool;
@@ -58,16 +58,23 @@ class P2pserver {
   // Creates a server on a given port
   listen() {
     const server = new WebSocket.Server({ port: P2P_PORT });
-    server.on("connection", (socket) => {
-      this.connectSocket(socket);
+    server.on("connection", (socket, request) => {
+      const parsedUrl = new URL(request.url, `http://${request.headers.host}`);
+      const port = parsedUrl.searchParams.get("port");
+      const isFaulty = parsedUrl.searchParams.get("isFaulty");
+      console.log(
+        `new connection from ${port} to ${P2P_PORT}`,
+      );
+      this.connectSocket(socket, port, isFaulty === 'true');
       this.messageHandler(socket);
     });
     this.connectToPeers();
     this.connectToCore();
 
     setInterval(async () => {
-      const rate = await this.blockchain.getRate();
+      const rate = await this.blockchain.getRate(this.sockets);
       const total = this.blockchain.getTotal();
+      console.log(`PEERS ${SUBSET_INDEX}`, P2P_PORT, IS_FAULTY, JSON.stringify(Object.keys(this.sockets).map((port) => ({ port, isFaulty: this.sockets[port].isFaulty}))));
       console.log(`RATE INTERVAL BROADCAST ${SUBSET_INDEX}`, JSON.stringify(rate));
       console.log(`TOTAL INTERVAL BROADCAST ${SUBSET_INDEX}`, JSON.stringify(total));
       this.broadcastRateToCore(rate, total);
@@ -75,12 +82,19 @@ class P2pserver {
   }
 
   // connects to a given socket and registers the message handler on it
-  connectSocket(socket, isCore = false) {
+  connectSocket(socket, port, isFaulty, isCore = false) {
     if (!isCore) {
-      this.sockets.push(socket);
+      this.sockets[port] = {
+        socket,
+        isFaulty
+      };
     } else {
       this.coreSocket = socket;
     }
+  }
+
+  getOtherSockets(senderPort) {
+    return Object.keys(this.sockets).filter((port) => port !== senderPort).map((port) => this.sockets[port].socket);
   }
 
   waitForWebServer(url, retryInterval = 1000) {
@@ -113,7 +127,7 @@ class P2pserver {
     peers.forEach((peer) => {
       const connectPeer = () => {
         const socket = new WebSocket(
-        `${peer}?port=${P2P_PORT}&subsetIndex=${SUBSET_INDEX}&httpPort=${process.env.HTTP_PORT}`,
+        `${peer}?port=${P2P_PORT}&isFaulty=${IS_FAULTY ? 'true' : 'false'}&subsetIndex=${SUBSET_INDEX}&httpPort=${process.env.HTTP_PORT}`,
         );
         socket.on("error", (error) => {
           console.error(`Failed to connect to peer. Retrying in 5s...`, error);
@@ -123,7 +137,7 @@ class P2pserver {
           console.log(
             `new connection from inside ${P2P_PORT} to ${peer.split(":")[2]}`,
           );
-          this.connectSocket(socket);
+          this.connectSocket(socket, peer.split(":")[2], false);
           this.messageHandler(socket);
         });
       };
@@ -144,7 +158,7 @@ class P2pserver {
       console.log(
         `new connection from inside ${P2P_PORT} to ${core.split(":")[2]}`,
       );
-      this.connectSocket(socket, true);
+      this.connectSocket(socket, core.split(":")[2], false, true);
       this.messageHandler(socket, true);
       });
     };
@@ -152,8 +166,8 @@ class P2pserver {
   }
 
   // broadcasts transactions
-  broadcastTransaction(transaction) {
-    this.sockets.forEach((socket) => {
+  broadcastTransaction(senderPort, transaction) {
+    this.getOtherSockets(senderPort).forEach((socket) => {
       this.sendTransaction(socket, transaction);
     });
   }
@@ -163,14 +177,16 @@ class P2pserver {
     socket.send(
       JSON.stringify({
         type: MESSAGE_TYPE.transaction,
+        port: P2P_PORT,
         transaction: transaction,
+        isFaulty: IS_FAULTY
       }),
     );
   }
 
   // broadcasts preprepare
-  broadcastPrePrepare(block, blocksCount, previousBlock = undefined) {
-    this.sockets.forEach((socket) => {
+  broadcastPrePrepare(senderPort, block, blocksCount, previousBlock = undefined) {
+    this.getOtherSockets(senderPort).forEach((socket) => {
       this.sendPrePrepare(socket, block, blocksCount, previousBlock);
     });
   }
@@ -180,6 +196,7 @@ class P2pserver {
     socket.send(
       JSON.stringify({
         type: MESSAGE_TYPE.pre_prepare,
+        port: P2P_PORT,
         block,
         previousBlock,
         blocksCount,
@@ -188,8 +205,8 @@ class P2pserver {
   }
 
   // broadcast prepare
-  broadcastPrepare(prepare) {
-    this.sockets.forEach((socket) => {
+  broadcastPrepare(senderPort, prepare) {
+    this.getOtherSockets(senderPort).forEach((socket) => {
       this.sendPrepare(socket, prepare);
     });
   }
@@ -199,14 +216,15 @@ class P2pserver {
     socket.send(
       JSON.stringify({
         type: MESSAGE_TYPE.prepare,
+        port: P2P_PORT,
         prepare: prepare,
       }),
     );
   }
 
   // broadcasts commit
-  broadcastCommit(commit) {
-    this.sockets.forEach((socket) => {
+  broadcastCommit(senderPort, commit) {
+    this.getOtherSockets(senderPort).forEach((socket) => {
       this.sendCommit(socket, commit);
     });
   }
@@ -216,14 +234,15 @@ class P2pserver {
     socket.send(
       JSON.stringify({
         type: MESSAGE_TYPE.commit,
+        port: P2P_PORT,
         commit: commit,
       }),
     );
   }
 
   // broadcasts round change
-  broadcastRoundChange(message) {
-    this.sockets.forEach((socket) => {
+  broadcastRoundChange(senderPort, message) {
+    this.getOtherSockets(senderPort).forEach((socket) => {
       this.sendRoundChange(socket, message);
     });
   }
@@ -233,6 +252,7 @@ class P2pserver {
     socket.send(
       JSON.stringify({
         type: MESSAGE_TYPE.round_change,
+        port: P2P_PORT,
         message,
       }),
     );
@@ -254,6 +274,7 @@ class P2pserver {
     this.coreSocket?.send(
       JSON.stringify({
         type: MESSAGE_TYPE.rate_to_core,
+        port: P2P_PORT,
         rate,
         total
       }),
@@ -273,7 +294,7 @@ class P2pserver {
     });
   }
 
-  initiateBlockCreation(triggeredByTransaction = true) {
+  initiateBlockCreation(port, triggeredByTransaction = true) {
     this.lastTransactionCreatedAt = new Date();
     const thresholdReached = this.transactionPool.poolFull();
     // check if limit reached
@@ -329,6 +350,7 @@ class P2pserver {
         this.transactionPool.assignTransactions(block);
 
         this.broadcastPrePrepare(
+          port,
           block,
           this.blockchain.chain[SUBSET_INDEX].length,
           previousBlock,
@@ -349,14 +371,14 @@ class P2pserver {
       now - this.lastTransactionCreatedAt >= 8 * 1000 /* 8 seconds */ && 
       this.transactionPool.transactions.unassigned.length > 0
       ) {
-      this.initiateBlockCreation(false);
+      this.initiateBlockCreation(P2P_PORT,false);
       }
     }, 1 * 10 * 1000); // 10 seconds
   }
 
   // parse message
   async parseMessage(data, isCore) {
-    console.log(P2P_PORT, "RECEIVED", data.type);
+    console.log(P2P_PORT, "RECEIVED", data.type, data.port);
 
     if (IS_FAULTY && ![MESSAGE_TYPE.transaction].includes(data.type)) {
       return;
@@ -370,6 +392,9 @@ class P2pserver {
           this.transactionPool.verifyTransaction(data.transaction) &&
           this.validators.isValidValidator(data.transaction.from)
         ) {
+          if (data.port && data.port in this.sockets) {
+            this.sockets[data.port].isFaulty = data.isFaulty;
+          }
           this.transactionPool.addTransaction(
             data.transaction,
           );
@@ -379,9 +404,9 @@ class P2pserver {
             this.transactionPool.transactions.unassigned.length,
           );
           // send transactions to other nodes
-          this.broadcastTransaction(data.transaction);
+          this.broadcastTransaction(data.port, data.transaction);
 
-          this.initiateBlockCreation();
+          this.initiateBlockCreation(data.port);
         }
         break;
       case MESSAGE_TYPE.pre_prepare:
@@ -403,6 +428,7 @@ class P2pserver {
 
           // send to other nodes
           this.broadcastPrePrepare(
+            data.port,
             data.block,
             data.blocksCount,
             data.previousBlock,
@@ -411,7 +437,7 @@ class P2pserver {
           if (data.block?.hash) {
             // create and broadcast a prepare message
             let prepare = this.preparePool.prepare(data.block, this.wallet);
-            this.broadcastPrepare(prepare);
+            this.broadcastPrepare(data.port, prepare);
           }
         }
         break;
@@ -426,7 +452,7 @@ class P2pserver {
           this.preparePool.addPrepare(data.prepare);
 
           // send to other nodes
-          this.broadcastPrepare(data.prepare);
+          this.broadcastPrepare(data.port, data.prepare);
 
           // if no of prepare messages reaches minimum required
           // send commit message
@@ -435,7 +461,7 @@ class P2pserver {
             MIN_APPROVALS
           ) {
             let commit = this.commitPool.commit(data.prepare, this.wallet);
-            this.broadcastCommit(commit);
+            this.broadcastCommit(data.port, commit);
           }
         }
         break;
@@ -450,7 +476,7 @@ class P2pserver {
           this.commitPool.addCommit(data.commit);
 
           // send to other nodes
-          this.broadcastCommit(data.commit);
+          this.broadcastCommit(data.port, data.commit);
 
           // if no of commit messages reaches minimum required
           // add updated block to chain
@@ -480,7 +506,7 @@ class P2pserver {
                 ],
                 this.wallet,
               );
-              this.broadcastRoundChange(message);
+              this.broadcastRoundChange(data.port, message);
 
             } else {
               console.log(
@@ -489,7 +515,7 @@ class P2pserver {
                 this.blockchain.chain[SUBSET_INDEX].length,
               );
             }
-            const rate = await this.blockchain.getRate();
+            const rate = await this.blockchain.getRate(this.sockets);
             const stats = {
               total: this.blockchain.getTotal(),
               rate,
@@ -516,7 +542,7 @@ class P2pserver {
           this.messagePool.addMessage(data.message);
 
           // send to other nodes
-          this.broadcastRoundChange(data.message);
+          this.broadcastRoundChange(data.port, data.message);
 
           // if enough messages are received, clear the pools
           if (
@@ -542,7 +568,7 @@ class P2pserver {
           isCore === true
         ) {
           this.blockchain.addBlock(data.block, data.subsetIndex);
-          const rate = await this.blockchain.getRate();
+          const rate = await this.blockchain.getRate(this.sockets);
           const stats = { total: this.blockchain.getTotal(), rate };
           console.log(
             P2P_PORT,

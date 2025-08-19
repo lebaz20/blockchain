@@ -14,7 +14,8 @@ const PreparePool = require('./services/pools/prepare')
 const MessagePool = require('./services/pools/message')
 const MESSAGE_TYPE = require('./constants/message')
 
-const HTTP_PORT = process.env.HTTP_PORT || 3001
+const HTTP_PORT = process.env.HTTP_PORT || 3001;
+const P2P_PORT = process.env.P2P_PORT || 5001;
 const { NODES_SUBSET, SUBSET_INDEX } = config.get()
 
 // Instantiate all objects
@@ -52,7 +53,7 @@ app.get('/blocks', (request, response) => {
 
 // sends the chain stats to the user
 app.get('/stats', async (request, response) => {
-  const rate = await blockchain.getRate()
+  const rate = await blockchain.getRate(p2pserver.sockets)
   const stats = {
     total: blockchain.getTotal(),
     rate,
@@ -79,7 +80,7 @@ app.post('/transaction', async (request, response) => {
         const redirectResponse = await axios({
           method: request.method,
           url: `${redirectUrl}/transaction`,
-          data: hasUnassignedTransactions ? [...unassignedTransactions, request.body] : request.body
+          data: hasUnassignedTransactions ? [...unassignedTransactions.map(transaction => transaction.input.data), request.body] : request.body
         })
         if (hasUnassignedTransactions) {
           transactionPool.transactions.unassigned = [];
@@ -101,9 +102,9 @@ app.post('/transaction', async (request, response) => {
   } else {
     const data = Array.isArray(request.body) ? request.body : [request.body]
     data.forEach((item) => {
-      console.log(`Processing transaction on ${HTTP_PORT}`)
+      console.log(`Processing transaction on ${HTTP_PORT}`, JSON.stringify(item))
       const transaction = wallet.createTransaction(item)
-      p2pserver.broadcastTransaction(transaction)
+      p2pserver.broadcastTransaction(P2P_PORT, transaction)
       p2pserver.parseMessage({ type: MESSAGE_TYPE.transaction, transaction })
     })
     response.redirect('/stats')

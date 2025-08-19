@@ -6,7 +6,7 @@ const Block = require("./block");
 const RateUtility = require("../utils/rate");
 const { readCgroupCPUPercentPromise } = require("../utils/cpu");
 const { SHARD_STATUS } = require("../constants/status");
-const { NODES_SUBSET, NUMBER_OF_NODES_PER_SHARD, SUBSET_INDEX, TRANSACTION_THRESHOLD } = config.get();
+const { NODES_SUBSET, NUMBER_OF_NODES_PER_SHARD, SUBSET_INDEX, IS_FAULTY, MIN_APPROVALS } = config.get();
 
 class Blockchain {
   // the constructor takes an argument validators class object
@@ -54,10 +54,13 @@ class Blockchain {
   // calculates the next proposer by calculating a random index of the validators list
   // index is calculated using the hash of the latest block
   getProposer(blocksCount = undefined) {
+    const currentChainLength = this.chain[SUBSET_INDEX].length;
+    let blockIndex = (blocksCount ?? currentChainLength) - 1;
+    if (!this.chain[SUBSET_INDEX][blockIndex]?.hash) {
+      blockIndex = currentChainLength - 1;
+    }
     const index =
-      this.chain[SUBSET_INDEX][
-        (blocksCount ?? this.chain[SUBSET_INDEX].length) - 1
-      ].hash[0].charCodeAt(0) % NUMBER_OF_NODES_PER_SHARD;
+      this.chain[SUBSET_INDEX][blockIndex].hash[0].charCodeAt(0) % NUMBER_OF_NODES_PER_SHARD;
     return {
       proposer: this.validatorList[index],
       proposerIndex: NODES_SUBSET[index],
@@ -159,11 +162,16 @@ class Blockchain {
   }
 
   // get shard rate of blocks and transactions
-  async getRate() {
+  async getRate(sockets) {
+    let nonFaultyNodesCount = Object.keys(sockets).filter((port) => !sockets[port].isFaulty).length;
+    if (!IS_FAULTY) {
+      nonFaultyNodesCount++;
+    }
+
     const cpuPercentage = await readCgroupCPUPercentPromise();
     const previousMinute = RateUtility.getPreviousMinute()
     const currentShardTransactionsRate = RateUtility.getRatePerMin(this.transactionPool?.ratePerMin, previousMinute);
-    let currentShardBlocksRate;
+    // let currentShardBlocksRate;
     const rate = {
       blocks: {},
       transactions: {
@@ -173,30 +181,29 @@ class Blockchain {
     Object.keys(this.chain).forEach((subsetIndex) => {
       const blocksRate = RateUtility.getRatePerMin(this.ratePerMin[subsetIndex], previousMinute);
       rate.blocks[subsetIndex] = blocksRate;
-      if (subsetIndex === SUBSET_INDEX) {
-        currentShardBlocksRate = blocksRate;
-      }
+      // if (subsetIndex === SUBSET_INDEX) {
+      //   currentShardBlocksRate = blocksRate;
+      // }
     });
 
-    const currentShardProcessedTransactionsPeakRate = currentShardBlocksRate * TRANSACTION_THRESHOLD + TRANSACTION_THRESHOLD;
+    // const currentShardProcessedTransactionsPeakRate = currentShardBlocksRate * TRANSACTION_THRESHOLD + TRANSACTION_THRESHOLD;
     let shardStatus = SHARD_STATUS.normal;
-    // transaction rate less than threshold needed for a single block or less than a lower-bound threshold or no transactions at all
-    if (cpuPercentage < 20) {
-      shardStatus = SHARD_STATUS.under_utilized;
-      // didn't build a single block or transaction rate is more than double the produced blocks rate
-      // TODO: track failed consensus attempts
-    } else if (!currentShardBlocksRate || currentShardTransactionsRate > currentShardProcessedTransactionsPeakRate * 2) {
+    // didn't build a single block or transaction rate is more than double the produced blocks rate
+    // TODO: track failed consensus attempts
+    // } else if (!currentShardBlocksRate || currentShardTransactionsRate > currentShardProcessedTransactionsPeakRate * 2) {
+    if (nonFaultyNodesCount < MIN_APPROVALS) {
       shardStatus = SHARD_STATUS.faulty;
-      // transaction rate is more than the peak rate of processed transactions by a margin
+    } else if (cpuPercentage < 20) {
+      shardStatus = SHARD_STATUS.under_utilized;
     } else if (cpuPercentage > 70) {
       shardStatus = SHARD_STATUS.over_utilized;
-      // transaction rate less than threshold needed for a single block or less than a lower-bound threshold or no transactions at all
     }
 
     rate.shardStatus = shardStatus;
     // rate.shardStatus = SUBSET_INDEX === 'SUBSET1' ? SHARD_STATUS.faulty : SHARD_STATUS.normal;
     rate.nodeIndex = `NODE${process.env.HTTP_PORT.slice(1)}`;
     rate.shardIndex = SUBSET_INDEX;
+    rate.shardSize = sockets ? Object.keys(sockets).length + 1 : 0;
     rate.cpu = `${cpuPercentage.toString()}%`;
     return rate;
   }

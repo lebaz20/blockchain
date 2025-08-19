@@ -12,7 +12,7 @@ docker push lebaz20/blockchain-core-server:latest
 
 # Run prepare-config.js locally (not inside Docker)
 NUMBER_OF_NODES=16
-NUMBER_OF_FAULTY_NODES=4
+NUMBER_OF_FAULTY_NODES=5
 NUMBER_OF_NODES_PER_SHARD=4
 TRANSACTION_THRESHOLD=100
 CPU_LIMIT=0.001

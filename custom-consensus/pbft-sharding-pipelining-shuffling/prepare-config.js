@@ -65,7 +65,7 @@ const getRandomIndicesArrays = (array) => {
 const { shards: nodesSubsets, faultyNodes } = getRandomIndicesArrays(
   Array.from({ length: NUMBER_OF_NODES }, (_, index) => index)
 )
-console.log(nodesSubsets)
+console.log(nodesSubsets, faultyNodes)
 let environmentArray = [];
 // Save environmentVariables to a yml file
 const environmentFile = 'nodesEnv.yml';

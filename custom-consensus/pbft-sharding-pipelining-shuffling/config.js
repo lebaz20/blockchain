@@ -31,7 +31,7 @@ function loadConfig() {
   const NUMBER_OF_FAULTY_NODES = process.env.NUMBER_OF_FAULTY_NODES || 0
 
   // Minimum number of positive votes required for the message/block to be valid
-  const MIN_APPROVALS = 2 * (NUMBER_OF_NODES_PER_SHARD / 3) + 1
+  const MIN_APPROVALS = 2 * (NUMBER_OF_NODES_PER_SHARD / 3);
 
   // SUBSET INDEX
   const SUBSET_INDEX = process.env.SUBSET_INDEX ?? 'SUBSET1'
