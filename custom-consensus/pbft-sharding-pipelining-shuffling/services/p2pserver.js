@@ -42,6 +42,7 @@ class P2pserver {
     commitPool,
     messagePool,
     validators,
+    idaGossip
   ) {
     this.sockets = {};
     this.wallet = wallet;
@@ -53,6 +54,7 @@ class P2pserver {
     this.messagePool = messagePool;
     this.validators = validators;
     this.lastTransactionCreatedAt = undefined;
+    this.idaGossip = idaGossip;
   }
 
   // Creates a server on a given port
@@ -88,13 +90,11 @@ class P2pserver {
         socket,
         isFaulty
       };
+      this.idaGossip.setPeerSockets(this.sockets);
     } else {
       this.coreSocket = socket;
+      this.idaGossip.setCoreSocket(socket);
     }
-  }
-
-  getOtherSockets(senderPort) {
-    return Object.keys(this.sockets).filter((port) => port !== senderPort).map((port) => this.sockets[port].socket);
   }
 
   waitForWebServer(url, retryInterval = 1000) {
@@ -167,118 +167,95 @@ class P2pserver {
 
   // broadcasts transactions
   broadcastTransaction(senderPort, transaction) {
-    this.getOtherSockets(senderPort).forEach((socket) => {
-      this.sendTransaction(socket, transaction);
-    });
-  }
-
-  // sends transactions to a perticular socket
-  sendTransaction(socket, transaction) {
-    socket.send(
-      JSON.stringify({
+    this.idaGossip.sendToShardPeers({
+      message: {
         type: MESSAGE_TYPE.transaction,
         port: P2P_PORT,
         transaction: transaction,
         isFaulty: IS_FAULTY
-      }),
-    );
+      },
+      senderPort
+    })
   }
 
   // broadcasts preprepare
   broadcastPrePrepare(senderPort, block, blocksCount, previousBlock = undefined) {
-    this.getOtherSockets(senderPort).forEach((socket) => {
-      this.sendPrePrepare(socket, block, blocksCount, previousBlock);
-    });
-  }
-
-  // sends preprepare to a particular socket
-  sendPrePrepare(socket, block, blocksCount, previousBlock = undefined) {
-    socket.send(
-      JSON.stringify({
+    this.idaGossip.sendToShardPeers({
+      message: {
         type: MESSAGE_TYPE.pre_prepare,
         port: P2P_PORT,
-        block,
-        previousBlock,
-        blocksCount,
-      }),
-    );
+        data: {
+          block,
+          previousBlock,
+          blocksCount,
+        },
+      },
+      chunkKey: 'data',
+      senderPort
+    })
   }
 
   // broadcast prepare
   broadcastPrepare(senderPort, prepare) {
-    this.getOtherSockets(senderPort).forEach((socket) => {
-      this.sendPrepare(socket, prepare);
-    });
-  }
-
-  // sends prepare to a particular socket
-  sendPrepare(socket, prepare) {
-    socket.send(
-      JSON.stringify({
+    this.idaGossip.sendToShardPeers({
+      message: {
         type: MESSAGE_TYPE.prepare,
         port: P2P_PORT,
-        prepare: prepare,
-      }),
-    );
+        prepare,
+      },
+      chunkKey: 'prepare',
+      senderPort
+    })
   }
 
   // broadcasts commit
   broadcastCommit(senderPort, commit) {
-    this.getOtherSockets(senderPort).forEach((socket) => {
-      this.sendCommit(socket, commit);
-    });
-  }
-
-  // sends commit to a particular socket
-  sendCommit(socket, commit) {
-    socket.send(
-      JSON.stringify({
+    this.idaGossip.sendToShardPeers({
+      message: {
         type: MESSAGE_TYPE.commit,
         port: P2P_PORT,
-        commit: commit,
-      }),
-    );
+        commit,
+      },
+      chunkKey: 'commit',
+      senderPort
+    })
   }
 
   // broadcasts round change
   broadcastRoundChange(senderPort, message) {
-    this.getOtherSockets(senderPort).forEach((socket) => {
-      this.sendRoundChange(socket, message);
-    });
-  }
-
-  // sends round change message to a particular socket
-  sendRoundChange(socket, message) {
-    socket.send(
-      JSON.stringify({
+    this.idaGossip.sendToShardPeers({
+      message: {
         type: MESSAGE_TYPE.round_change,
         port: P2P_PORT,
         message,
-      }),
-    );
+      },
+      chunkKey: 'message',
+      senderPort
+    })
   }
 
   // broadcasts block to core
   broadcastBlockToCore(block) {
-    this.coreSocket.send(
-      JSON.stringify({
+    this.idaGossip.sendToCore({
+      message: {
         type: MESSAGE_TYPE.block_to_core,
         block,
         subsetIndex: SUBSET_INDEX,
-      }),
-    );
+      },
+      chunkKey: 'block'
+    })
   }
 
   // broadcasts rate to core
   broadcastRateToCore(rate, total) {
-    this.coreSocket?.send(
-      JSON.stringify({
+    this.idaGossip.sendToCore({
+      message: {
         type: MESSAGE_TYPE.rate_to_core,
         port: P2P_PORT,
         rate,
         total
-      }),
-    );
+      },
+    })
   }
 
   // handles any message sent to the current node
@@ -409,38 +386,40 @@ class P2pserver {
           this.initiateBlockCreation(data.port);
         }
         break;
-      case MESSAGE_TYPE.pre_prepare:
+      case MESSAGE_TYPE.pre_prepare: {
+        const { block, previousBlock, blocksCount } = data.data;
         // check if block is valid
         if (
-          !this.blockPool.existingBlock(data.block) &&
+          !this.blockPool.existingBlock(block) &&
           this.blockchain.isValidBlock(
-            data.block,
-            data.blocksCount,
-            data.previousBlock,
+            block,
+            blocksCount,
+            previousBlock,
           )
         ) {
           // add block to pool
-          this.blockPool.addBlock(data.block);
+          this.blockPool.addBlock(block);
 
           // assign block transactions to the block
           // Release assignment after x time in case block creation doesn't succeed
-          this.transactionPool.assignTransactions(data.block);
+          this.transactionPool.assignTransactions(block);
 
           // send to other nodes
           this.broadcastPrePrepare(
             data.port,
-            data.block,
-            data.blocksCount,
-            data.previousBlock,
+            block,
+            blocksCount,
+            previousBlock,
           );
 
-          if (data.block?.hash) {
+          if (block?.hash) {
             // create and broadcast a prepare message
-            let prepare = this.preparePool.prepare(data.block, this.wallet);
+            let prepare = this.preparePool.prepare(block, this.wallet);
             this.broadcastPrepare(data.port, prepare);
           }
         }
         break;
+      }
       case MESSAGE_TYPE.prepare:
         // check if the prepare message is valid
         if (

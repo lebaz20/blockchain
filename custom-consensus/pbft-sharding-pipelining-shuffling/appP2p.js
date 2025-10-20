@@ -7,6 +7,7 @@ const Wallet = require('./services/wallet')
 const P2pserver = require('./services/p2pserver')
 const Validators = require('./services/validators')
 const Blockchain = require('./services/blockchain')
+const IDAGossip = require('./services/idaGossip')
 const TransactionPool = require('./services/pools/transaction')
 const BlockPool = require('./services/pools/block')
 const CommitPool = require('./services/pools/commit')
@@ -30,6 +31,7 @@ const blockPool = new BlockPool()
 const preparePool = new PreparePool()
 const commitPool = new CommitPool()
 const messagePool = new MessagePool()
+const idaGossip = new IDAGossip();
 const p2pserver = new P2pserver(
   blockchain,
   transactionPool,
@@ -38,7 +40,8 @@ const p2pserver = new P2pserver(
   preparePool,
   commitPool,
   messagePool,
-  validators
+  validators,
+  idaGossip
 )
 
 // sends all transactions in the transaction pool to the user
@@ -109,6 +112,13 @@ app.post('/transaction', async (request, response) => {
     })
     response.redirect('/stats')
   }
+})
+
+// parse message
+app.post('/message', async (request, response) => {
+    console.log(`Processing message on ${HTTP_PORT}`, JSON.stringify(request.body))
+    p2pserver.parseMessage(request.body)
+    response.status(200).send('Ok')
 })
 
 // starts the app server

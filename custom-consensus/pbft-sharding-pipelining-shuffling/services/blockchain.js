@@ -83,8 +83,6 @@ class Blockchain {
       return true;
     } else {
       console.log(
-        previousBlock,
-        lastBlock,
         lastBlock.sequenceNo + 1 == block.sequenceNo,
         block.lastHash === lastBlock.hash,
         block.hash === Block.blockHash(block),

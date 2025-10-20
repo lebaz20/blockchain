@@ -21,6 +21,13 @@ function loadConfig() {
   const NUMBER_OF_NODES_PER_SHARD = process.env.NUMBER_OF_NODES_PER_SHARD
     ? parseInt(process.env.NUMBER_OF_NODES_PER_SHARD, 10)
     : 4
+ 
+  const DEFAULT_TTL = process.env.DEFAULT_TTL
+    ? parseInt(process.env.DEFAULT_TTL, 10)
+    : 6;
+  const NUMBER_OF_NODES = process.env.NUMBER_OF_NODES
+    ? parseInt(process.env.NUMBER_OF_NODES, 10)
+    : 8
   const NODES_SUBSET = process.env.NODES_SUBSET
     ? JSON.parse(process.env.NODES_SUBSET)
     : []
@@ -44,13 +51,15 @@ function loadConfig() {
   const config = {
     TRANSACTION_THRESHOLD,
     NUMBER_OF_NODES_PER_SHARD,
+    NUMBER_OF_NODES,
     NUMBER_OF_FAULTY_NODES,
     MIN_APPROVALS,
     SUBSET_INDEX,
     NODES_SUBSET,
     CPU_LIMIT,
     REDIRECT_TO_URL,
-    IS_FAULTY
+    IS_FAULTY,
+    DEFAULT_TTL
   }
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
   return config

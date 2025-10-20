@@ -24,6 +24,7 @@ const NUMBER_OF_NODES = Number(process.env.NUMBER_OF_NODES)
 const TRANSACTION_THRESHOLD = Number(process.env.TRANSACTION_THRESHOLD)
 const NUMBER_OF_FAULTY_NODES = Number(process.env.NUMBER_OF_FAULTY_NODES)
 const NUMBER_OF_NODES_PER_SHARD = Number(process.env.NUMBER_OF_NODES_PER_SHARD)
+const DEFAULT_TTL = Number(process.env.DEFAULT_TTL)
 const CPU_LIMIT = Number(process.env.CPU_LIMIT)
 
 const coreServerPort = 4999
@@ -84,10 +85,12 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
       HTTP_PORT: 3001 + index,
       TRANSACTION_THRESHOLD,
       NUMBER_OF_NODES_PER_SHARD: NUMBER_OF_NODES_PER_SHARD,
+      NUMBER_OF_NODES: NUMBER_OF_NODES,
       NODES_SUBSET: JSON.stringify(nodesSubset),
       SUBSET_INDEX: `SUBSET${subsetIndex + 1}`,
       CORE: `ws://core-server:${coreServerPort}`,
       CPU_LIMIT,
+      DEFAULT_TTL
     }
 
     if (index > 0) {
