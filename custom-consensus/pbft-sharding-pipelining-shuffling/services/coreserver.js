@@ -2,14 +2,17 @@
 const WebSocket = require("ws");
 const MESSAGE_TYPE = require("../constants/message");
 const { SHARD_STATUS } = require("../constants/status");
+const config = require('./config')
 
 class Coreserver {
-  constructor(port, blockchain) {
+  constructor(port, blockchain, idaGossip) {
     this.port = port;
     this.sockets = {};
     this.socketsMap = {};
     this.blockchain = blockchain;
     this.rates = {};
+    this.idaGossip = idaGossip;
+    this.config = config.get()
   }
 
   // Creates a server on a given port
@@ -38,60 +41,31 @@ class Coreserver {
       url: `http://p2p-server-${Number(port) - 5001}:${httpPort}`,
     };
     this.socketsMap[subsetIndex].push(port);
-  }
-
-  getOtherSubsets(subsetIndex) {
-    const sockets = [];
-    Object.keys(this.sockets)
-      .filter((socketSubsetIndex) => socketSubsetIndex != subsetIndex)
-      .forEach((socketSubsetIndex) => {
-        Object.keys(this.sockets[socketSubsetIndex]).forEach((socketPort) => {
-          const socket = this.sockets[socketSubsetIndex][socketPort].socket;
-          sockets.push(socket);
-        });
-      });
-    return sockets;
+    this.idaGossip.setNodeSockets(this.sockets);
   }
 
   // broadcast block
   broadcastBlock(block, subsetIndex) {
-    const sockets = this.getOtherSubsets(subsetIndex);
-    sockets.forEach((socket) => {
-      this.sendBlock(socket, block, subsetIndex);
-    });
-  }
-
-  // sends block to a particular socket
-  sendBlock(socket, block, subsetIndex) {
-    socket.send(
-      JSON.stringify({
+    this.idaGossip.broadcastFromCore({
+      message: {
         type: MESSAGE_TYPE.block_from_core,
         block,
         subsetIndex,
-      }),
-    );
-  }
-
-  getSubset(subsetIndex) {
-    return Object.values(this.sockets[subsetIndex]);
-  }
+      },
+      chunkKey: 'block',
+      sendersSubsetIndex: subsetIndex
+    });
+  };
 
   // update config
   updateConfig(config, subsetIndex) {
-    const sockets = this.getSubset(subsetIndex);
-    sockets.forEach(({ socket }) => {
-      this.sendConfig(socket, config);
-    });
-  }
-
-  // sends config to a particular socket
-  sendConfig(socket, config) {
-    socket.send(
-      JSON.stringify({
+    this.idaGossip.sendFromCoreToSpecificShard({
+      message: {
         type: MESSAGE_TYPE.config_from_core,
         config,
-      }),
-    );
+      },
+      targetsSubsetIndex: subsetIndex
+    });
   }
 
   // handles any message sent to the current node
@@ -131,6 +105,8 @@ class Coreserver {
               blocks: data.rate.blocks?.[data.rate.shardIndex],
               shardStatus: data.rate.shardStatus
             };
+            const { SHOULD_REDIRECT_FROM_FAULTY_NODES } = this.config.get();
+            if (SHOULD_REDIRECT_FROM_FAULTY_NODES) {
             const shardStatusMap = {};
             Object.values(SHARD_STATUS).forEach((status) => {
               shardStatusMap[status] = Object.entries(this.rates)
@@ -186,6 +162,7 @@ class Coreserver {
               this.updateConfig(config, shardIndex);
             });
           }
+        }
           console.log(`CORE RATE:`, JSON.stringify(this.rates));
           console.log(`CORE TOTAL:`, JSON.stringify(data.total));
           break;

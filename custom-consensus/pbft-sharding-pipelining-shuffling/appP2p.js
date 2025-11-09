@@ -1,6 +1,5 @@
 // Import all required models
 const express = require('express')
-const axios = require('axios')
 const bodyParser = require('body-parser')
 const config = require('./config')
 const Wallet = require('./services/wallet')
@@ -72,26 +71,24 @@ app.get('/health', (request, response) => {
 
 // creates transactions for the sent data
 app.post('/transaction', async (request, response) => {
-  const REDIRECT_TO_URL = config.get().REDIRECT_TO_URL
+  const { REDIRECT_TO_URL, SHOULD_REDIRECT_FROM_FAULTY_NODES } = config.get()
   const unassignedTransactions = transactionPool.transactions.unassigned
   const hasUnassignedTransactions = unassignedTransactions && unassignedTransactions.length > 0
-  if (Array.isArray(REDIRECT_TO_URL) && REDIRECT_TO_URL.length > 0) {
+  if (SHOULD_REDIRECT_FROM_FAULTY_NODES && Array.isArray(REDIRECT_TO_URL) && REDIRECT_TO_URL.length > 0) {
     let lastError = null
     for (const redirectUrl of REDIRECT_TO_URL) {
       console.log(`Redirect from ${HTTP_PORT} to ${redirectUrl}`)
       try {
-        const redirectResponse = await axios({
-          method: request.method,
-          url: `${redirectUrl}/transaction`,
-          data: hasUnassignedTransactions ? [...unassignedTransactions.map(transaction => transaction.input.data), request.body] : request.body
+        await idaGossip.sendToAnotherShard({
+          message: { transactions: hasUnassignedTransactions ? [...unassignedTransactions.map(transaction => transaction.input.data), request.body] : request.body },
+          chunkKey: 'transactions',
+          targetsSubset: [`${redirectUrl}/transaction`],
         })
         if (hasUnassignedTransactions) {
           transactionPool.transactions.unassigned = [];
         }
         // If successful, return the response immediately
-        return response
-          .status(redirectResponse.status)
-          .send(redirectResponse.data)
+        return response.status(200)
       } catch (error) {
         lastError = error
         // Try next redirectUrl in the array
@@ -103,7 +100,7 @@ app.post('/transaction', async (request, response) => {
       .status(lastError?.response?.status || 500)
       .send(lastError?.message || 'All redirects failed')
   } else {
-    const data = Array.isArray(request.body) ? request.body : [request.body]
+    const data = request.body.transactions ? request.body.transactions : [request.body]
     data.forEach((item) => {
       console.log(`Processing transaction on ${HTTP_PORT}`, JSON.stringify(item))
       const transaction = wallet.createTransaction(item)

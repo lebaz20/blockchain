@@ -26,6 +26,8 @@ const NUMBER_OF_FAULTY_NODES = Number(process.env.NUMBER_OF_FAULTY_NODES)
 const NUMBER_OF_NODES_PER_SHARD = Number(process.env.NUMBER_OF_NODES_PER_SHARD)
 const DEFAULT_TTL = Number(process.env.DEFAULT_TTL)
 const CPU_LIMIT = Number(process.env.CPU_LIMIT)
+const HAS_COMMITTEE_SHARD = Number(process.env.HAS_COMMITTEE_SHARD) === 1 ? 'true' : 'false'
+const SHOULD_REDIRECT_FROM_FAULTY_NODES = Number(process.env.SHOULD_REDIRECT_FROM_FAULTY_NODES) === 1 ? 'true' : 'false'
 
 const coreServerPort = 4999
 
@@ -57,13 +59,15 @@ const getRandomIndicesArrays = (array) => {
   const indices = Array.from({ length: array.length }, (_, index) => index);
   const shuffledArray = shuffleArray(indices);
   const faultyNodes = shuffleArray(shuffledArray).slice(0, NUMBER_OF_FAULTY_NODES);
+  const committeeShard = HAS_COMMITTEE_SHARD ? shuffleArray(shuffledArray.filter((_, index) => !faultyNodes.includes(index))).slice(0, NUMBER_OF_NODES_PER_SHARD) : [];
   return {
     shards: splitIntoShardsWithRemaining(shuffledArray),
-    faultyNodes
+    faultyNodes,
+    committeeShard
   };
 }
 
-const { shards: nodesSubsets, faultyNodes } = getRandomIndicesArrays(
+const { shards: nodesSubsets, faultyNodes, committeeShard: committeeSubset } = getRandomIndicesArrays(
   Array.from({ length: NUMBER_OF_NODES }, (_, index) => index)
 )
 console.log(nodesSubsets, faultyNodes)
@@ -81,6 +85,7 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
       // ...process.env, // Keep existing environment variables
       SECRET: `NODE${index}`,
       IS_FAULTY: faultyNodes.includes(index),
+      SHOULD_REDIRECT_FROM_FAULTY_NODES,
       P2P_PORT: 5001 + index,
       HTTP_PORT: 3001 + index,
       TRANSACTION_THRESHOLD,
@@ -99,11 +104,22 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
         (_, index_) => `ws://p2p-server-${index_}:${index_ + 5001}`
       )
       let peersSubset = []
+      let committeePeersSubset = []
+      committeeSubset.forEach((index) => {
+        if (index in peers) {
+          committeePeersSubset.push(peers[index])
+        }
+      })
       nodesSubset.forEach((index) => {
         if (index in peers) {
           peersSubset.push(peers[index])
         }
       })
+      if (committeePeersSubset.length > 0 && committeeSubset.includes(index)) {
+        console.log(`COMMITTEE Peers for ${5001 + index}: `, committeePeersSubset)
+        environmentVariables.COMMITTEE_PEERS = committeePeersSubset.join(',');
+        environmentVariables.COMMITTEE_SUBSET = JSON.stringify(committeeSubset);
+      }
       if (peersSubset.length > 0 && nodesSubset.includes(index)) {
         console.log(`Peers for ${5001 + index}: `, peersSubset)
         environmentVariables.PEERS = peersSubset.join(',')
@@ -203,6 +219,10 @@ const k8sConfig = {
                 cpu
               }
             },
+            env: [{
+              name: 'SHOULD_REDIRECT_FROM_FAULTY_NODES',
+              value: String(SHOULD_REDIRECT_FROM_FAULTY_NODES)
+            }],
             ports: [
               { containerPort: coreServerPort },
             ]

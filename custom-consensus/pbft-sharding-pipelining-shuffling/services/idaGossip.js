@@ -8,8 +8,13 @@ const { NUMBER_OF_NODES, DEFAULT_TTL, NUMBER_OF_NODES_PER_SHARD } = config.get()
 class IDAGossip {
   constructor() {
     this.fileChunks = new Map(); // Store received chunks
+    this.socketGossipNodes; // Connected nodes (all network peers)
     this.socketGossipPeers; // Connected peers
     this.socketGossipCore; // Connected Core
+  }
+
+  setNodeSockets(sockets) {
+    this.socketGossipNodes = sockets;
   }
 
   setPeerSockets(sockets) {
@@ -20,8 +25,25 @@ class IDAGossip {
     this.socketGossipCore = socket;
   }
 
-  getSocketGossipPeers(senderPort) {
-    return Object.keys(this.socketGossipPeers).filter((port) => port !== senderPort).map((port) => this.socketGossipPeers[port].socket);
+  getOtherSubsets(subsetIndex) {
+    const sockets = [];
+    Object.keys(this.socketGossipNodes)
+      .filter((socketSubsetIndex) => socketSubsetIndex != subsetIndex)
+      .forEach((socketSubsetIndex) => {
+        Object.keys(this.socketGossipNodes[socketSubsetIndex]).forEach((socketPort) => {
+          const socket = this.socketGossipNodes[socketSubsetIndex][socketPort].socket;
+          sockets.push(socket);
+        });
+      });
+    return sockets;
+  }
+
+  getSubset(subsetIndex) {
+    return Object.values(this.socketGossipNodes[subsetIndex]).map(({ socket }) => socket);
+  }
+
+  getSocketGossipPeers(sendersSubset) {
+    return Object.keys(this.socketGossipPeers).filter((port) => !sendersSubset.includes(port)).map((port) => this.socketGossipPeers[port].socket);
   }
 
   getHTTPGossipPeers(sendersSubset) {
@@ -104,14 +126,16 @@ class IDAGossip {
   gossipChunk(message, ttl = DEFAULT_TTL) {
     if (ttl <= 0) return;
 
-    const { communicationType, sendersSubset, targetsSubset, shouldGossip, senderPort } = message;
+    const { communicationType, sendersSubset, targetsSubset, shouldGossip } = message;
     let peers;
     if (communicationType === 'http') {
         peers = targetsSubset ?? this.getHTTPGossipPeers(sendersSubset);
-    } else if (targetsSubset === 'core') {
-        peers = this.socketGossipCore;
     } else {
-        peers = this.getSocketGossipPeers(senderPort);
+        if (targetsSubset === 'core') {
+            peers = [this.socketGossipCore];
+        } else {
+            peers = targetsSubset ?? this.getSocketGossipPeers(sendersSubset);
+        }
     }
     const randomPeers = shouldGossip ? peers.sort(() => 0.5 - Math.random()).slice(0, 4) : peers;
     
@@ -145,9 +169,8 @@ class IDAGossip {
     return this.sendData({
         message,
         chunkKey,
-        senderPort,
         communicationType: 'ws',
-        sendersSubset: [],
+        sendersSubset: [senderPort],
         targetsSubset: [],
         shouldGossip: NUMBER_OF_NODES_PER_SHARD > 4,
         ttl: this.calculateTTL(NUMBER_OF_NODES_PER_SHARD)
@@ -170,18 +193,36 @@ class IDAGossip {
     });
   }
 
-  sendFromCore({
+  broadcastFromCore({
     message,
     chunkKey,
-    sendersSubset
+    sendersSubsetIndex
   }) {
+    const targetsSubset = this.getOtherSubsets(sendersSubsetIndex);
     return this.sendData({
         message,
         chunkKey,
-        communicationType: 'http',
-        sendersSubset,
-        targetsSubset: [],
+        communicationType: 'ws',
+        sendersSubset: [],
+        targetsSubset,
         shouldGossip: true,
+        ttl: this.calculateTTL(NUMBER_OF_NODES)
+    });
+  }
+
+  sendFromCoreToSpecificShard({
+    message,
+    chunkKey,
+    targetsSubsetIndex
+  }) {
+    const targetsSubset = this.getSubset(targetsSubsetIndex);
+    return this.sendData({
+        message,
+        chunkKey,
+        communicationType: 'ws',
+        sendersSubset: [],
+        targetsSubset,
+        shouldGossip: NUMBER_OF_NODES_PER_SHARD > 4,
         ttl: this.calculateTTL(NUMBER_OF_NODES)
     });
   }
@@ -208,7 +249,6 @@ class IDAGossip {
     targetsSubset,
     chunkKey,
     shouldGossip,
-    senderPort,
     ttl = DEFAULT_TTL
   }) {
     const chunks = chunkKey ? this.splitData(message[chunkKey]) : [message];
@@ -221,7 +261,6 @@ class IDAGossip {
             communicationType,
             targetsSubset,
             shouldGossip,
-            senderPort
         }
         if (chunkKey) {
             message[chunkKey] = chunk;

@@ -32,6 +32,7 @@ function loadConfig() {
     ? JSON.parse(process.env.NODES_SUBSET)
     : []
 
+  const SHOULD_REDIRECT_FROM_FAULTY_NODES = process.env.SHOULD_REDIRECT_FROM_FAULTY_NODES === 'true';
   const IS_FAULTY = process.env.IS_FAULTY === 'true';
 
   // improve performance by using a subset of nodes in the network
@@ -59,6 +60,7 @@ function loadConfig() {
     CPU_LIMIT,
     REDIRECT_TO_URL,
     IS_FAULTY,
+    SHOULD_REDIRECT_FROM_FAULTY_NODES,
     DEFAULT_TTL
   }
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
