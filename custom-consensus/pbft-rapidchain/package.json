@@ -1,0 +1,26 @@
+{
+  "scripts": {
+    "format": "prettier --write .",
+    "lint": "eslint . ",
+    "lint:fix": "eslint . --fix "
+  },
+  "dependencies": {
+    "axios": "^1.8.3",
+    "crypto-js": "^4.2.0",
+    "elliptic": "^6.6.1",
+    "express": "^4.21.2",
+    "js-yaml": "^4.1.0",
+    "uuid": "^11.1.0",
+    "ws": "^8.18.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.25.1",
+    "eslint": "^9.25.1",
+    "eslint-plugin-import": "2.31.0",
+    "eslint-plugin-promise": "7.2.1",
+    "eslint-plugin-sonarjs": "3.0.2",
+    "eslint-plugin-unicorn": "59.0.0",
+    "globals": "^16.0.0",
+    "prettier": "3.5.3"
+  }
+}

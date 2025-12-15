@@ -1,3 +1,0 @@
-Label,# Samples,Average,Median,90% Line,95% Line,99% Line,Min,Max,Error %,Throughput,Received KB/sec,Sent KB/sec
-Thread Group:HTTP Request,722,1385,178,4847,10126,17240,2,21840,0.277%,10.65337,4.50,3.01
-TOTAL,722,1385,178,4847,10126,17240,2,21840,0.277%,10.65337,4.50,3.01
