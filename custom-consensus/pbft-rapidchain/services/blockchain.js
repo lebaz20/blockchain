@@ -6,7 +6,7 @@ const Block = require("./block");
 const RateUtility = require("../utils/rate");
 const { readCgroupCPUPercentPromise } = require("../utils/cpu");
 const { SHARD_STATUS } = require("../constants/status");
-const { NODES_SUBSET, NUMBER_OF_NODES_PER_SHARD, SUBSET_INDEX, IS_FAULTY, MIN_APPROVALS, BLOCK_THRESHOLD } = config.get();
+const { NODES_SUBSET, NUMBER_OF_NODES_PER_SHARD, SUBSET_INDEX, IS_FAULTY, MIN_APPROVALS } = config.get();
 
 class Blockchain {
   // the constructor takes an argument validators class object
@@ -60,14 +60,16 @@ class Blockchain {
 
   // calculates the next proposer by calculating a random index of the validators list
   // index is calculated using the hash of the latest block
-  getProposer(blocksCount = undefined) {
-    const currentChainLength = this.chain[SUBSET_INDEX].length;
+  getProposer(blocksCount = undefined, isCommittee = false) {
+    const chain = isCommittee ? this.committeeChain : this.chain;
+    const currentChainLength = chain[SUBSET_INDEX].length;
     let blockIndex = (blocksCount ?? currentChainLength) - 1;
-    if (!this.chain[SUBSET_INDEX][blockIndex]?.hash) {
+    if (!chain[SUBSET_INDEX][blockIndex]?.hash) {
       blockIndex = currentChainLength - 1;
     }
-    const index =
-      this.chain[SUBSET_INDEX][blockIndex].hash[0].charCodeAt(0) % NUMBER_OF_NODES_PER_SHARD;
+
+    const currentMinute = new Date().getMinutes(); // 0-59
+    const index = (chain[SUBSET_INDEX][blockIndex].hash[0].charCodeAt(0) + currentMinute) % NUMBER_OF_NODES_PER_SHARD;
     return {
       proposer: this.validatorList[index],
       proposerIndex: NODES_SUBSET[index],
@@ -75,16 +77,17 @@ class Blockchain {
   }
 
   // checks if the received block is valid
-  isValidBlock(block, blocksCount, previousBlock = undefined) {
+  isValidBlock(block, blocksCount, previousBlock = undefined, isCommittee = false) {
+    const chain = isCommittee ? this.committeeChain : this.chain;
     const lastBlock =
       previousBlock ??
-      this.chain[SUBSET_INDEX][this.chain[SUBSET_INDEX].length - 1];
+      chain[SUBSET_INDEX][chain[SUBSET_INDEX].length - 1];
     if (
       lastBlock.sequenceNo + 1 == block.sequenceNo &&
       block.lastHash === lastBlock.hash &&
       block.hash === Block.blockHash(block) &&
       Block.verifyBlock(block) &&
-      Block.verifyProposer(block, this.getProposer(blocksCount).proposer)
+      Block.verifyProposer(block, this.getProposer(blocksCount, isCommittee).proposer)
     ) {
       console.log("BLOCK VALID");
       return true;
@@ -94,7 +97,7 @@ class Blockchain {
         block.lastHash === lastBlock.hash,
         block.hash === Block.blockHash(block),
         Block.verifyBlock(block),
-        Block.verifyProposer(block, this.getProposer(blocksCount).proposer),
+        Block.verifyProposer(block, this.getProposer(blocksCount, isCommittee).proposer),
       );
       console.log("BLOCK INVALID");
       return false;
@@ -129,10 +132,6 @@ class Blockchain {
   // checks if the block already exists
   existingBlock(hash, subsetIndex = SUBSET_INDEX, isCommittee = false) {
     return !!(isCommittee ? this.committeeChain : this.chain[subsetIndex])?.find((b) => b.hash === hash);
-  }
-
-  tempPoolFull() {
-    return this.committeeChain.length >= BLOCK_THRESHOLD;
   }
 
   waitUntilAvailableBlock(item, existingCheck) {

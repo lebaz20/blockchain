@@ -3,7 +3,7 @@ const WebSocket = require("ws");
 const MESSAGE_TYPE = require("../constants/message");
 const { SHARD_STATUS } = require("../constants/status");
 const config = require('./config')
-
+const { COMMITTEE_SUBSET_INDEX } = config.get();
 class Coreserver {
   constructor(port, blockchain, idaGossip) {
     this.port = port;
@@ -17,7 +17,6 @@ class Coreserver {
 
   // Creates a server on a given port
   listen() {
-    const { COMMITTEE_SUBSET_INDEX } = this.config.get();
     const server = new WebSocket.Server({ port: this.port });
     console.log(`Listening on port ${this.port}`);
     server.on("connection", (socket, request) => {
@@ -55,7 +54,7 @@ class Coreserver {
         subsetIndex,
       },
       chunkKey: 'block',
-      targetsSubsetIndex: committeeSubnetIndex
+      targetsSubsetIndex: COMMITTEE_SUBSET_INDEX
     });
   };
 

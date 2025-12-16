@@ -59,8 +59,10 @@ class Blockchain {
     if (!this.chain[SUBSET_INDEX][blockIndex]?.hash) {
       blockIndex = currentChainLength - 1;
     }
-    const index =
-      this.chain[SUBSET_INDEX][blockIndex].hash[0].charCodeAt(0) % NUMBER_OF_NODES_PER_SHARD;
+
+    const currentMinute = new Date().getMinutes(); // 0-59
+    const index = (this.chain[SUBSET_INDEX][blockIndex].hash[0].charCodeAt(0) + currentMinute) % NUMBER_OF_NODES_PER_SHARD;
+    
     return {
       proposer: this.validatorList[index],
       proposerIndex: NODES_SUBSET[index],

@@ -231,7 +231,7 @@ const k8sConfig = {
               value: committeeSubnetIndex,
             }, {
               name: 'BLOCK_THRESHOLD',
-              value: blockThreshold,
+              value: BLOCK_THRESHOLD,
             }],
             ports: [
               { containerPort: coreServerPort },

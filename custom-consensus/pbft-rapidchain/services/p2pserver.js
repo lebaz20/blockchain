@@ -351,7 +351,7 @@ class P2pserver {
           isCommittee
         );
       }
-      const proposerObject = this.blockchain.getProposer();
+      const proposerObject = this.blockchain.getProposer(undefined, isCommittee);
       console.log(
         P2P_PORT,
         "PROPOSE BLOCK CONDITION",
@@ -467,6 +467,7 @@ class P2pserver {
             block,
             blocksCount,
             previousBlock,
+            isCommittee
           )
         ) {
           // add block to pool
@@ -639,9 +640,8 @@ class P2pserver {
               JSON.stringify(stats),
             );
           } else {
-            const { data: blockData, ...rest } = data.block;
-            const transaction = wallet.createTransaction({
-              data: blockData,
+            const transaction = this.wallet.createTransaction({
+              data: data.block.data,
               subsetIndex: data.subsetIndex,
             })
             if (
