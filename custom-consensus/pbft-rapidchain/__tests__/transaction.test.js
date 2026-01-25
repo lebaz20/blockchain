@@ -39,7 +39,7 @@ describe('Transaction', () => {
     it('should generate unique transaction IDs', () => {
       const transaction1 = new Transaction(testData, wallet)
       const transaction2 = new Transaction(testData, wallet)
-      
+
       expect(transaction1.id).not.toBe(transaction2.id)
     })
 
@@ -57,7 +57,7 @@ describe('Transaction', () => {
       const beforeCreation = Date.now()
       const newTransaction = new Transaction(testData, wallet)
       const afterCreation = Date.now()
-      
+
       expect(newTransaction.createdAt).toBeGreaterThanOrEqual(beforeCreation)
       expect(newTransaction.createdAt).toBeLessThanOrEqual(afterCreation)
     })
@@ -80,7 +80,7 @@ describe('Transaction', () => {
       const otherWallet = new Wallet('other-wallet-secret')
       const otherHash = ChainUtility.hash({ other: 'data' })
       transaction.signature = otherWallet.sign(otherHash)
-      
+
       const isValid = Transaction.verifyTransaction(transaction)
       expect(isValid).toBe(false)
     })
@@ -106,7 +106,7 @@ describe('Transaction', () => {
       const transaction1 = new Transaction({ amount: 100 }, wallet)
       const transaction2 = new Transaction({ amount: 200 }, wallet)
       const transaction3 = new Transaction({ amount: 300 }, wallet)
-      
+
       expect(Transaction.verifyTransaction(transaction1)).toBe(true)
       expect(Transaction.verifyTransaction(transaction2)).toBe(true)
       expect(Transaction.verifyTransaction(transaction3)).toBe(true)
@@ -117,7 +117,7 @@ describe('Transaction', () => {
     it('should maintain data integrity through hash verification', () => {
       const originalHash = transaction.hash
       const recomputedHash = ChainUtility.hash(transaction.input)
-      
+
       expect(originalHash).toBe(recomputedHash)
     })
 
@@ -127,7 +127,7 @@ describe('Transaction', () => {
         transaction.signature,
         transaction.hash
       )
-      
+
       expect(isSignatureValid).toBe(true)
     })
   })

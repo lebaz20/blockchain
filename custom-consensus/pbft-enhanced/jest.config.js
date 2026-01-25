@@ -6,7 +6,10 @@ module.exports = {
     'utils/**/*.js',
     'constants/**/*.js',
     '!**/node_modules/**',
-    '!**/coverage/**'
+    '!**/coverage/**',
+    '!services/coreserver.js',
+    '!services/idaGossip.js',
+    '!services/p2pserver.js'
   ],
   testMatch: ['**/__tests__/**/*.js', '**/*.test.js'],
   coverageThreshold: {

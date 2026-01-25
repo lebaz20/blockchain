@@ -112,7 +112,11 @@ describe('Block', () => {
     })
 
     it('should sign the block hash with wallet', () => {
-      const computedHash = Block.hash(block.timestamp, block.lastHash, block.data)
+      const computedHash = Block.hash(
+        block.timestamp,
+        block.lastHash,
+        block.data
+      )
       const expectedSignature = wallet.sign(computedHash)
 
       expect(block.signature).toBe(expectedSignature)
@@ -128,7 +132,9 @@ describe('Block', () => {
     })
 
     it('should handle large data arrays', () => {
-      const largeData = Array.from({ length: 100 }, (_, index) => ({ id: index }))
+      const largeData = Array.from({ length: 100 }, (_, index) => ({
+        id: index
+      }))
       const largeBlock = Block.createBlock(genesisBlock, largeData, wallet)
       expect(largeBlock.data).toEqual(largeData)
     })
@@ -186,7 +192,11 @@ describe('Block', () => {
   describe('blockHash', () => {
     it('should compute hash from block properties', () => {
       const computedHash = Block.blockHash(block)
-      const expectedHash = Block.hash(block.timestamp, block.lastHash, block.data)
+      const expectedHash = Block.hash(
+        block.timestamp,
+        block.lastHash,
+        block.data
+      )
 
       expect(computedHash).toBe(expectedHash)
     })
@@ -230,7 +240,7 @@ describe('Block', () => {
       // When data changes, the recomputed hash won't match the signature
       // Tamper with data
       block.data = 'completely-different-data-that-changes-hash'
-      
+
       // Verification recomputes hash and compares signature
       const isValid = Block.verifyBlock(block)
       expect(isValid).toBe(false)
@@ -251,7 +261,9 @@ describe('Block', () => {
     it('should reject block with invalid signature', () => {
       // Use signature from different block
       const otherWallet = new Wallet('other-proposer-secret')
-      const otherHash = Block.hash(Date.now(), 'other-hash', [{ other: 'data' }])
+      const otherHash = Block.hash(Date.now(), 'other-hash', [
+        { other: 'data' }
+      ])
       block.signature = otherWallet.sign(otherHash)
       const isValid = Block.verifyBlock(block)
       expect(isValid).toBe(false)
