@@ -86,26 +86,19 @@ class Blockchain {
     const lastBlock =
       previousBlock ??
       this.chain[SUBSET_INDEX][this.chain[SUBSET_INDEX].length - 1]
-    if (
+    const isValid =
       lastBlock.sequenceNo + 1 === block.sequenceNo &&
       block.lastHash === lastBlock.hash &&
       block.hash === Block.blockHash(block) &&
       Block.verifyBlock(block) &&
       Block.verifyProposer(block, this.getProposer(blocksCount).proposer)
-    ) {
+
+    if (isValid) {
       logger.log('BLOCK VALID')
-      return true
     } else {
-      logger.log(
-        lastBlock.sequenceNo + 1 === block.sequenceNo,
-        block.lastHash === lastBlock.hash,
-        block.hash === Block.blockHash(block),
-        Block.verifyBlock(block),
-        Block.verifyProposer(block, this.getProposer(blocksCount).proposer)
-      )
       logger.error('BLOCK INVALID')
-      return false
     }
+    return isValid
   }
 
   async addUpdatedBlock(hash, blockPool, preparePool, commitPool) {
@@ -176,14 +169,27 @@ class Blockchain {
     return total
   }
 
+  // Calculate shard status based on non-faulty nodes and CPU usage
+  calculateShardStatus(nonFaultyNodesCount, cpuPercentage) {
+    if (nonFaultyNodesCount < MIN_APPROVALS) {
+      return SHARD_STATUS.faulty
+    }
+    if (cpuPercentage < CPU_UNDER_UTILIZED_THRESHOLD) {
+      return SHARD_STATUS.under_utilized
+    }
+    if (cpuPercentage > CPU_OVER_UTILIZED_THRESHOLD) {
+      return SHARD_STATUS.over_utilized
+    }
+    return SHARD_STATUS.normal
+  }
+
   // get shard rate of blocks and transactions
   async getRate(sockets) {
-    let nonFaultyNodesCount = Object.keys(sockets).filter(
-      (port) => !sockets[port].isFaulty
+    const faultyNodesCount = Object.keys(sockets).filter(
+      (port) => sockets[port].isFaulty
     ).length
-    if (!IS_FAULTY) {
-      nonFaultyNodesCount++
-    }
+    const totalNodesCount = Object.keys(sockets).length + (IS_FAULTY ? 0 : 1)
+    const nonFaultyNodesCount = totalNodesCount - faultyNodesCount
 
     const cpuPercentage = await readCgroupCPUPercentPromise()
     const previousMinute = RateUtility.getPreviousMinute()
@@ -191,7 +197,6 @@ class Blockchain {
       this.transactionPool?.ratePerMin,
       previousMinute
     )
-    // let currentShardBlocksRate;
     const rate = {
       blocks: {},
       transactions: {
@@ -199,31 +204,17 @@ class Blockchain {
       }
     }
     Object.keys(this.chain).forEach((subsetIndex) => {
-      const blocksRate = RateUtility.getRatePerMin(
+      const blocksRatePerMinute = RateUtility.getRatePerMin(
         this.ratePerMin[subsetIndex],
         previousMinute
       )
-      rate.blocks[subsetIndex] = blocksRate
-      // if (subsetIndex === SUBSET_INDEX) {
-      //   currentShardBlocksRate = blocksRate;
-      // }
+      rate.blocks[subsetIndex] = blocksRatePerMinute
     })
 
-    // const currentShardProcessedTransactionsPeakRate = currentShardBlocksRate * TRANSACTION_THRESHOLD + TRANSACTION_THRESHOLD;
-    let shardStatus = SHARD_STATUS.normal
-    // didn't build a single block or transaction rate is more than double the produced blocks rate
-    // TODO: track failed consensus attempts
-    // } else if (!currentShardBlocksRate || currentShardTransactionsRate > currentShardProcessedTransactionsPeakRate * 2) {
-    if (nonFaultyNodesCount < MIN_APPROVALS) {
-      shardStatus = SHARD_STATUS.faulty
-    } else if (cpuPercentage < CPU_UNDER_UTILIZED_THRESHOLD) {
-      shardStatus = SHARD_STATUS.under_utilized
-    } else if (cpuPercentage > CPU_OVER_UTILIZED_THRESHOLD) {
-      shardStatus = SHARD_STATUS.over_utilized
-    }
-
-    rate.shardStatus = shardStatus
-    // rate.shardStatus = SUBSET_INDEX === 'SUBSET1' ? SHARD_STATUS.faulty : SHARD_STATUS.normal;
+    rate.shardStatus = this.calculateShardStatus(
+      nonFaultyNodesCount,
+      cpuPercentage
+    )
     rate.nodeIndex = `NODE${process.env.HTTP_PORT.slice(1)}`
     rate.shardIndex = SUBSET_INDEX
     rate.shardSize = sockets ? Object.keys(sockets).length + 1 : 0
