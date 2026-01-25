@@ -2,7 +2,7 @@
 const WebSocket = require("ws");
 const MESSAGE_TYPE = require("../constants/message");
 const { SHARD_STATUS } = require("../constants/status");
-const config = require('./config')
+const config = require('../config')
 const { COMMITTEE_SUBSET_INDEX } = config.get();
 class Coreserver {
   constructor(port, blockchain, idaGossip) {

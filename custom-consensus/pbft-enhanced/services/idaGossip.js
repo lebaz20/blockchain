@@ -264,7 +264,7 @@ class IDAGossip {
 
     // Wait for all gossipChunk promises to resolve
     const promises =  chunks.map((chunk, index) => {
-        const message = {
+        const processedMessage = {
             ...message,
             sendersSubset,
             communicationType,
@@ -273,12 +273,12 @@ class IDAGossip {
             socketsKey
         }
         if (chunkKey) {
-            message[chunkKey] = chunk;
+            processedMessage[chunkKey] = chunk;
         }
         // Stagger chunk sending to avoid overwhelming network
         return new Promise(resolve => {
             setTimeout(() => {
-                resolve(this.gossipChunk(message, ttl));
+                resolve(this.gossipChunk(processedMessage, ttl));
             }, index * 100);
         });
     });

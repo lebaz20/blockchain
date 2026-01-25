@@ -140,6 +140,7 @@ const k8sConfig = {
           {
             name: 'p2p-server',
             image: 'lebaz20/blockchain-p2p-server:latest',
+            imagePullPolicy: 'IfNotPresent',
             resources: {
               limits: {
                 memory,
@@ -199,6 +200,7 @@ const k8sConfig = {
           {
             name: 'core-server',
             image: 'lebaz20/blockchain-core-server:latest',
+            imagePullPolicy: 'IfNotPresent',
             resources: {
               limits: {
                 memory,

@@ -106,6 +106,14 @@ app.post('/transaction', async (request, response) => {
       const transaction = wallet.createTransaction(item)
       p2pserver.broadcastTransaction(P2P_PORT, transaction)
       p2pserver.parseMessage({ type: MESSAGE_TYPE.transaction, transaction })
+
+      /**
+       * Simulate block verification by random shards
+       * We need then to mark faulty shards and exclude them from the network activities
+       */
+      const duplicateTransaction = wallet.createTransaction(item)
+      p2pserver.broadcastTransaction(P2P_PORT, duplicateTransaction)
+      p2pserver.parseMessage({ type: MESSAGE_TYPE.transaction, transaction: duplicateTransaction })
     })
     response.redirect('/stats')
   }

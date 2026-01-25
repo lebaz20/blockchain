@@ -3,22 +3,22 @@
 set -e
 
 # # Build the Docker image
-# docker build -f Dockerfile.p2p -t lebaz20/blockchain-p2p-server:latest .
-# docker build -f Dockerfile.core -t lebaz20/blockchain-core-server:latest .
+docker build -f Dockerfile.p2p -t lebaz20/blockchain-rapidchain-p2p-server:latest .
+docker build -f Dockerfile.core -t lebaz20/blockchain-rapidchain-core-server:latest .
 
 # # Push the Docker image to the local registry
-# docker push lebaz20/blockchain-p2p-server:latest
-# docker push lebaz20/blockchain-core-server:latest
+# docker push lebaz20/blockchain-rapidchain-p2p-server:latest
+# docker push lebaz20/blockchain-rapidchain-core-server:latest
 
 # Run prepare-config.js locally (not inside Docker)
-NUMBER_OF_NODES=16
-NUMBER_OF_FAULTY_NODES=5
+NUMBER_OF_NODES=4
+NUMBER_OF_FAULTY_NODES=0
 NUMBER_OF_NODES_PER_SHARD=4
 HAS_COMMITTEE_SHARD=1
-SHOULD_REDIRECT_FROM_FAULTY_NODES=1
+SHOULD_REDIRECT_FROM_FAULTY_NODES=0
 TRANSACTION_THRESHOLD=100
 BLOCK_THRESHOLD=10
-CPU_LIMIT=0.5
+CPU_LIMIT=0.1
 NUMBER_OF_NODES=$NUMBER_OF_NODES BLOCK_THRESHOLD=$BLOCK_THRESHOLD TRANSACTION_THRESHOLD=$TRANSACTION_THRESHOLD NUMBER_OF_FAULTY_NODES=$NUMBER_OF_FAULTY_NODES NUMBER_OF_NODES_PER_SHARD=$NUMBER_OF_NODES_PER_SHARD HAS_COMMITTEE_SHARD=$HAS_COMMITTEE_SHARD SHOULD_REDIRECT_FROM_FAULTY_NODES=$SHOULD_REDIRECT_FROM_FAULTY_NODES CPU_LIMIT=$CPU_LIMIT node prepare-config.js
 
 sleep 2
