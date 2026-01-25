@@ -2,44 +2,95 @@
 
 set -e
 
-# # Build the Docker image
+# Color codes for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+echo -e "${BLUE}========================================${NC}"
+echo -e "${BLUE}Starting PBFT-RapidChain Blockchain${NC}"
+echo -e "${BLUE}========================================${NC}\n"
+
+# Step 1: Build the Docker images
+echo -e "${BLUE}Step 1: Building Docker images...${NC}"
 docker build -f Dockerfile.p2p -t lebaz20/blockchain-rapidchain-p2p-server:latest .
 docker build -f Dockerfile.core -t lebaz20/blockchain-rapidchain-core-server:latest .
+echo -e "${GREEN}✓ Docker images built${NC}\n"
 
-# # Push the Docker image to the local registry
+# Push the Docker image to the local registry (optional)
 # docker push lebaz20/blockchain-rapidchain-p2p-server:latest
 # docker push lebaz20/blockchain-rapidchain-core-server:latest
 
-# Run prepare-config.js locally (not inside Docker)
-NUMBER_OF_NODES=4
-NUMBER_OF_FAULTY_NODES=0
-NUMBER_OF_NODES_PER_SHARD=4
-HAS_COMMITTEE_SHARD=1
-SHOULD_REDIRECT_FROM_FAULTY_NODES=0
-TRANSACTION_THRESHOLD=100
-BLOCK_THRESHOLD=10
-CPU_LIMIT=0.1
-NUMBER_OF_NODES=$NUMBER_OF_NODES BLOCK_THRESHOLD=$BLOCK_THRESHOLD TRANSACTION_THRESHOLD=$TRANSACTION_THRESHOLD NUMBER_OF_FAULTY_NODES=$NUMBER_OF_FAULTY_NODES NUMBER_OF_NODES_PER_SHARD=$NUMBER_OF_NODES_PER_SHARD HAS_COMMITTEE_SHARD=$HAS_COMMITTEE_SHARD SHOULD_REDIRECT_FROM_FAULTY_NODES=$SHOULD_REDIRECT_FROM_FAULTY_NODES CPU_LIMIT=$CPU_LIMIT node prepare-config.js
+# Step 2: Generate configuration
+echo -e "${BLUE}Step 2: Generating configuration...${NC}"
+# Use environment variables if set, otherwise use defaults
+NUMBER_OF_NODES=${NUMBER_OF_NODES:-4}
+NUMBER_OF_FAULTY_NODES=${NUMBER_OF_FAULTY_NODES:-0}
+NUMBER_OF_NODES_PER_SHARD=${NUMBER_OF_NODES_PER_SHARD:-4}
+HAS_COMMITTEE_SHARD=${HAS_COMMITTEE_SHARD:-1}
+SHOULD_REDIRECT_FROM_FAULTY_NODES=${SHOULD_REDIRECT_FROM_FAULTY_NODES:-0}
+TRANSACTION_THRESHOLD=${TRANSACTION_THRESHOLD:-100}
+BLOCK_THRESHOLD=${BLOCK_THRESHOLD:-10}
+CPU_LIMIT=${CPU_LIMIT:-0.1}
+
+echo -e "  Nodes: ${NUMBER_OF_NODES}"
+echo -e "  Transaction Threshold: ${TRANSACTION_THRESHOLD}"
+echo -e "  Block Threshold: ${BLOCK_THRESHOLD}"
+echo -e "  Committee Shard: ${HAS_COMMITTEE_SHARD}"
+echo -e "  Faulty Nodes: ${NUMBER_OF_FAULTY_NODES}"
+echo -e "  CPU Limit: ${CPU_LIMIT}"
+
+NUMBER_OF_NODES=$NUMBER_OF_NODES \
+  BLOCK_THRESHOLD=$BLOCK_THRESHOLD \
+  TRANSACTION_THRESHOLD=$TRANSACTION_THRESHOLD \
+  NUMBER_OF_FAULTY_NODES=$NUMBER_OF_FAULTY_NODES \
+  NUMBER_OF_NODES_PER_SHARD=$NUMBER_OF_NODES_PER_SHARD \
+  HAS_COMMITTEE_SHARD=$HAS_COMMITTEE_SHARD \
+  SHOULD_REDIRECT_FROM_FAULTY_NODES=$SHOULD_REDIRECT_FROM_FAULTY_NODES \
+  CPU_LIMIT=$CPU_LIMIT \
+  node prepare-config.js
+
+echo -e "${GREEN}✓ Configuration generated${NC}\n"
 
 sleep 2
 
-# Apply the generated Kubernetes config
+# Step 3: Deploy to Kubernetes
+echo -e "${BLUE}Step 3: Deploying to Kubernetes...${NC}"
 kubectl delete -f kubeConfig.yml --ignore-not-found
 kubectl apply -f kubeConfig.yml
+echo -e "${GREEN}✓ Deployed to Kubernetes${NC}\n"
 
-# Wait for the pods to be ready
-echo "Waiting for all pods to be running..."
+# Step 4: Wait for the pods to be ready
+echo -e "${BLUE}Step 4: Waiting for pods to be ready...${NC}"
+TIMEOUT=120
+ELAPSED=0
 while true; do
-    not_running=$(kubectl get pods -l domain=blockchain --no-headers | grep -v 'Running' | wc -l)
+    not_running=$(kubectl get pods -l domain=blockchain --no-headers 2>/dev/null | grep -v 'Running' | wc -l | tr -d ' ')
     if [ "$not_running" -eq 0 ]; then
         break
     fi
+    if [ $ELAPSED -ge $TIMEOUT ]; then
+        echo -e "${RED}✗ Timeout waiting for pods to start${NC}"
+        exit 1
+    fi
     sleep 2
+    ELAPSED=$((ELAPSED + 2))
+    echo -ne "  Waiting... ${ELAPSED}s\r"
 done
-echo "All pods are running."
+echo -e "${GREEN}✓ All pods are running${NC}\n"
 
+# Step 5: Set up port forwarding
+echo -e "${BLUE}Step 5: Setting up port forwarding...${NC}"
 for ((i=0; i<NUMBER_OF_NODES; i++)); do
-  kubectl port-forward pod/p2p-server-$i $((3001+i)):$((3001+i)) &
+  kubectl port-forward pod/p2p-server-$i $((3001+i)):$((3001+i)) > /dev/null 2>&1 &
 done
+echo -e "${GREEN}✓ Port forwarding established (ports $((3001))-$((3000+NUMBER_OF_NODES)))${NC}\n"
+
+echo -e "${BLUE}========================================${NC}"
+echo -e "${GREEN}Blockchain is running!${NC}"
+echo -e "${BLUE}========================================${NC}"
+echo -e "Streaming logs... (Press Ctrl+C to stop)\n"
 
 kubectl logs -l domain=blockchain -f --max-log-requests=10000
