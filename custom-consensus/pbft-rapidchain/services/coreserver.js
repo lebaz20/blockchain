@@ -85,6 +85,107 @@ class Coreserver {
     })
   }
 
+  // Calculate shard status mapping from rates
+  calculateShardStatusMap() {
+    const shardStatusMap = {}
+    Object.values(SHARD_STATUS).forEach((status) => {
+      shardStatusMap[status] = Object.entries(this.rates)
+        .filter(([, rate]) => rate.shardStatus === status)
+        .map(([shardIndex]) => shardIndex)
+    })
+    return shardStatusMap
+  }
+
+  // Find best candidate shard for faulty shard redirection
+  findRedirectCandidate(assignedIndices, shardStatusMap) {
+    const candidateSets = [
+      {
+        shards: shardStatusMap[SHARD_STATUS.under_utilized] || [],
+        status: SHARD_STATUS.under_utilized
+      },
+      {
+        shards: shardStatusMap[SHARD_STATUS.normal] || [],
+        status: SHARD_STATUS.normal
+      },
+      {
+        shards: shardStatusMap[SHARD_STATUS.over_utilized] || [],
+        status: SHARD_STATUS.over_utilized
+      }
+    ]
+
+    for (const { shards, status } of candidateSets) {
+      const available = shards.filter((index) => !assignedIndices.has(index))
+      if (available.length > 0) {
+        const randomIndex = Math.floor(Math.random() * available.length)
+        return { selected: available[randomIndex], status }
+      }
+    }
+    return null
+  }
+
+  // Build faulty shard redirect assignment mapping
+  buildFaultyShardRedirectAssignment(faultyShards, shardStatusMap) {
+    const assignedIndices = new Set()
+    const faultyShardRedirectAssignment = {}
+
+    faultyShards.forEach((faultyShardIndex) => {
+      const result = this.findRedirectCandidate(assignedIndices, shardStatusMap)
+      if (result) {
+        assignedIndices.add(result.selected)
+        faultyShardRedirectAssignment[faultyShardIndex] = {
+          redirectSubset: result.selected,
+          status: result.status
+        }
+      }
+    })
+
+    return faultyShardRedirectAssignment
+  }
+
+  // Apply redirect configuration to faulty shards
+  applyRedirectConfiguration(faultyShardRedirectAssignment) {
+    Object.entries(faultyShardRedirectAssignment).forEach(
+      ([faultyShardIndex, { redirectSubset }]) => {
+        let redirectUrls = []
+        if (this.sockets[redirectSubset]) {
+          redirectUrls = Object.values(this.sockets[redirectSubset]).map(
+            (object) => object.url
+          )
+          const config = [{ key: 'REDIRECT_TO_URL', value: redirectUrls }]
+          this.updateConfig(config, faultyShardIndex)
+        }
+      }
+    )
+  }
+
+  // Clear redirect configuration for healthy shards
+  clearRedirectConfiguration(shards) {
+    shards.forEach((shardIndex) => {
+      const config = [{ key: 'REDIRECT_TO_URL', value: [] }]
+      this.updateConfig(config, shardIndex)
+    })
+  }
+
+  // Handle faulty shard redirection logic
+  handleFaultyShardRedirection() {
+    const shardStatusMap = this.calculateShardStatusMap()
+    const faultyShards = shardStatusMap[SHARD_STATUS.faulty] || []
+    const underUtilizedShards =
+      shardStatusMap[SHARD_STATUS.under_utilized] || []
+    const normalShards = shardStatusMap[SHARD_STATUS.normal] || []
+    const overUtilizedShards = shardStatusMap[SHARD_STATUS.over_utilized] || []
+
+    const faultyShardRedirectAssignment =
+      this.buildFaultyShardRedirectAssignment(faultyShards, shardStatusMap)
+
+    this.applyRedirectConfiguration(faultyShardRedirectAssignment)
+    this.clearRedirectConfiguration([
+      ...underUtilizedShards,
+      ...normalShards,
+      ...overUtilizedShards
+    ])
+  }
+
   // handles any message sent to the current node
   messageHandler(socket, isCommittee) {
     // registers message handler
@@ -144,85 +245,7 @@ class Coreserver {
             }
             const { SHOULD_REDIRECT_FROM_FAULTY_NODES } = this.config.get()
             if (SHOULD_REDIRECT_FROM_FAULTY_NODES) {
-              const shardStatusMap = {}
-              Object.values(SHARD_STATUS).forEach((status) => {
-                shardStatusMap[status] = Object.entries(this.rates)
-                  .filter(([, rate]) => rate.shardStatus === status)
-                  .map(([shardIndex]) => shardIndex)
-              })
-              // Build mapping for faulty shards
-              const faultyShards = shardStatusMap[SHARD_STATUS.faulty] || []
-              const underUtilizedShards =
-                shardStatusMap[SHARD_STATUS.under_utilized] || []
-              const normalShards = shardStatusMap[SHARD_STATUS.normal] || []
-              const overUtilizedShards =
-                shardStatusMap[SHARD_STATUS.over_utilized] || []
-
-              const assignedIndices = new Set()
-              const faultyShardRedirectAssignment = {}
-
-              faultyShards.forEach((faultyShardIndex) => {
-                let candidates = underUtilizedShards.filter(
-                  (index) => !assignedIndices.has(index)
-                )
-                let status = SHARD_STATUS.under_utilized
-                if (candidates.length === 0) {
-                  candidates = normalShards.filter(
-                    (index) => !assignedIndices.has(index)
-                  )
-                  status = SHARD_STATUS.normal
-                }
-                if (candidates.length === 0) {
-                  candidates = overUtilizedShards.filter(
-                    (index) => !assignedIndices.has(index)
-                  )
-                  status = SHARD_STATUS.over_utilized
-                }
-                if (candidates.length > 0) {
-                  const randomIndex = Math.floor(
-                    Math.random() * candidates.length
-                  )
-                  const selected = candidates[randomIndex]
-                  assignedIndices.add(selected)
-                  faultyShardRedirectAssignment[faultyShardIndex] = {
-                    redirectSubset: selected,
-                    status
-                  }
-                }
-              })
-
-              // faultyShardRedirectAssignment now contains mapping: { faultyShardIndex: { redirectSubset: mappedIndex, status: mappedStatus } }
-              Object.entries(faultyShardRedirectAssignment).forEach(
-                ([faultyShardIndex, { redirectSubset }]) => {
-                  // Collect all URLs in the redirectSubset
-                  let redirectUrls = []
-                  if (this.sockets[redirectSubset]) {
-                    redirectUrls = Object.values(
-                      this.sockets[redirectSubset]
-                    ).map((object) => object.url)
-                    const config = [
-                      {
-                        key: 'REDIRECT_TO_URL',
-                        value: redirectUrls
-                      }
-                    ]
-                    this.updateConfig(config, faultyShardIndex)
-                  }
-                }
-              )
-              ;[
-                ...underUtilizedShards,
-                ...normalShards,
-                ...overUtilizedShards
-              ].forEach((shardIndex) => {
-                const config = [
-                  {
-                    key: 'REDIRECT_TO_URL',
-                    value: []
-                  }
-                ]
-                this.updateConfig(config, shardIndex)
-              })
+              this.handleFaultyShardRedirection()
             }
           }
           logger.log(`CORE RATE:`, JSON.stringify(this.rates))
