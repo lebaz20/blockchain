@@ -61,9 +61,25 @@ describe('Blockchain', () => {
     })
 
     it('should create core blockchain without chain when isCore=true', () => {
-      const coreBlockchain = new Blockchain(validators, mockTransactionPool, true)
+      const coreBlockchain = new Blockchain(
+        validators,
+        mockTransactionPool,
+        true
+      )
       expect(coreBlockchain.chain).toEqual({})
       expect(coreBlockchain.validatorList).toBeUndefined()
+    })
+
+    it('should initialize committeeChain when isCore=true', () => {
+      const coreBlockchain = new Blockchain(
+        validators,
+        mockTransactionPool,
+        true
+      )
+      expect(coreBlockchain.committeeChain).toBeDefined()
+      expect(Array.isArray(coreBlockchain.committeeChain)).toBe(true)
+      expect(coreBlockchain.committeeChain.length).toBe(1)
+      expect(coreBlockchain.committeeChain[0].sequenceNo).toBe(0)
     })
   })
 
@@ -75,7 +91,9 @@ describe('Blockchain', () => {
       blockchain.addBlock(block)
 
       expect(blockchain.chain.SUBSET0.length).toBe(initialLength + 1)
-      expect(blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]).toBe(block)
+      expect(
+        blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]
+      ).toBe(block)
     })
 
     it('should set createdAt timestamp on block', () => {
@@ -90,7 +108,7 @@ describe('Blockchain', () => {
 
     it('should initialize chain for new subset index', () => {
       const block = { hash: 'test-hash', data: [], createdAt: Date.now() }
-      
+
       blockchain.addBlock(block, 'SUBSET1')
 
       expect(blockchain.chain.SUBSET1).toBeDefined()
@@ -99,10 +117,39 @@ describe('Blockchain', () => {
 
     it('should update rate per minute', () => {
       const block = { hash: 'test-hash', data: [], createdAt: Date.now() }
-      
+
       blockchain.addBlock(block)
 
       expect(blockchain.ratePerMin.SUBSET0).toBeDefined()
+    })
+
+    it('should add block to committeeChain when isCommittee=true', () => {
+      const coreBlockchain = new Blockchain(
+        validators,
+        mockTransactionPool,
+        true
+      )
+      const block = { hash: 'committee-hash', data: [], createdAt: Date.now() }
+      const initialLength = coreBlockchain.committeeChain.length
+
+      coreBlockchain.addBlock(block, undefined, true)
+
+      expect(coreBlockchain.committeeChain.length).toBe(initialLength + 1)
+      expect(
+        coreBlockchain.committeeChain[coreBlockchain.committeeChain.length - 1]
+      ).toBe(block)
+    })
+
+    it('should add block to regular chain when isCommittee=false', () => {
+      const block = { hash: 'regular-hash', data: [], createdAt: Date.now() }
+      const initialLength = blockchain.chain.SUBSET0.length
+
+      blockchain.addBlock(block, 'SUBSET0', false)
+
+      expect(blockchain.chain.SUBSET0.length).toBe(initialLength + 1)
+      expect(
+        blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]
+      ).toBe(block)
     })
   })
 
@@ -137,7 +184,8 @@ describe('Blockchain', () => {
 
       const block = blockchain.createBlock(transactions, wallet)
 
-      const lastBlock = blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]
+      const lastBlock =
+        blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]
       expect(block.lastHash).toBe(lastBlock.hash)
     })
   })
@@ -161,7 +209,15 @@ describe('Blockchain', () => {
 
     it('should handle custom blocks count', () => {
       const result = blockchain.getProposer(5)
-      
+
+      expect(result.proposer).toBeDefined()
+      expect(blockchain.validatorList).toContain(result.proposer)
+    })
+
+    it('should work with isCommittee parameter', () => {
+      // For P2P blockchain (not core), isCommittee parameter is available
+      const result = blockchain.getProposer(undefined, false)
+
       expect(result.proposer).toBeDefined()
       expect(blockchain.validatorList).toContain(result.proposer)
     })
@@ -204,7 +260,7 @@ describe('Blockchain', () => {
     it('should count transactions in blocks', () => {
       const block1 = { hash: 'hash1', data: [{ id: '1' }, { id: '2' }] }
       const block2 = { hash: 'hash2', data: [{ id: '3' }] }
-      
+
       blockchain.addBlock(block1)
       blockchain.addBlock(block2)
 
@@ -231,7 +287,10 @@ describe('Blockchain', () => {
     it('should resolve immediately if item exists', async () => {
       const existingCheck = jest.fn().mockReturnValue(true)
 
-      const result = await blockchain.waitUntilAvailableBlock('item', existingCheck)
+      const result = await blockchain.waitUntilAvailableBlock(
+        'item',
+        existingCheck
+      )
 
       expect(result).toBe(true)
       expect(existingCheck).toHaveBeenCalledWith('item')
@@ -240,7 +299,10 @@ describe('Blockchain', () => {
     it('should resolve false after max retries', async () => {
       const existingCheck = jest.fn().mockReturnValue(false)
 
-      const result = await blockchain.waitUntilAvailableBlock('item', existingCheck)
+      const result = await blockchain.waitUntilAvailableBlock(
+        'item',
+        existingCheck
+      )
 
       expect(result).toBe(false)
     }, 60000)
@@ -249,10 +311,13 @@ describe('Blockchain', () => {
       let callCount = 0
       const existingCheck = jest.fn(() => {
         callCount++
-        return callCount >= 2  // Make it succeed on 2nd try instead of 3rd
+        return callCount >= 2 // Make it succeed on 2nd try instead of 3rd
       })
 
-      const result = await blockchain.waitUntilAvailableBlock('item', existingCheck)
+      const result = await blockchain.waitUntilAvailableBlock(
+        'item',
+        existingCheck
+      )
 
       expect(result).toBe(true)
       expect(callCount).toBeGreaterThanOrEqual(2)
@@ -266,7 +331,7 @@ describe('Blockchain', () => {
       const proposerInfo = blockchain.getProposer()
       const proposerIndex = proposerInfo.proposerIndex
       const wallet = new Wallet(`NODE${proposerIndex}`)
-      
+
       const block = blockchain.createBlock([], wallet)
       const blocksCount = blockchain.chain.SUBSET0.length
 
@@ -280,7 +345,7 @@ describe('Blockchain', () => {
       const proposerInfo = blockchain.getProposer()
       const proposerIndex = proposerInfo.proposerIndex
       const wallet = new Wallet(`NODE${proposerIndex}`)
-      
+
       const block = blockchain.createBlock([], wallet)
       block.sequenceNo = 999
       const blocksCount = blockchain.chain.SUBSET0.length
@@ -295,7 +360,7 @@ describe('Blockchain', () => {
       const proposerInfo = blockchain.getProposer()
       const proposerIndex = proposerInfo.proposerIndex
       const wallet = new Wallet(`NODE${proposerIndex}`)
-      
+
       const block = blockchain.createBlock([], wallet)
       block.lastHash = 'wrong-hash'
       const blocksCount = blockchain.chain.SUBSET0.length
@@ -303,6 +368,27 @@ describe('Blockchain', () => {
       const isValid = blockchain.isValidBlock(block, blocksCount)
 
       expect(isValid).toBe(false)
+    })
+
+    it('should support isCommittee parameter in validation', () => {
+      const Wallet = require('../services/wallet')
+      const proposerInfo = blockchain.getProposer()
+      const proposerIndex = proposerInfo.proposerIndex
+      const wallet = new Wallet(`NODE${proposerIndex}`)
+
+      const block = blockchain.createBlock([], wallet)
+      const blocksCount = blockchain.chain.SUBSET0.length
+      const previousBlock = blockchain.chain.SUBSET0[blocksCount - 1]
+
+      // Test with isCommittee=false
+      const isValid = blockchain.isValidBlock(
+        block,
+        blocksCount,
+        previousBlock,
+        false
+      )
+
+      expect(isValid).toBe(true)
     })
   })
 })

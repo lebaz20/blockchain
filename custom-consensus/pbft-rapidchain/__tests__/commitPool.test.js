@@ -22,6 +22,12 @@ describe('CommitPool', () => {
       expect(typeof commitPool.list).toBe('object')
       expect(Object.keys(commitPool.list).length).toBe(0)
     })
+
+    it('should initialize with empty committeeList', () => {
+      expect(commitPool.committeeList).toBeDefined()
+      expect(typeof commitPool.committeeList).toBe('object')
+      expect(Object.keys(commitPool.committeeList).length).toBe(0)
+    })
   })
 
   describe('createCommit', () => {
@@ -104,6 +110,27 @@ describe('CommitPool', () => {
       expect(Object.keys(commitPool.list).length).toBe(2)
       expect(commitPool.list[prepare.blockHash].length).toBe(1)
       expect(commitPool.list['hash2'].length).toBe(1)
+    })
+
+    it('should add commit to committeeList when isCommittee=true', () => {
+      const commit = commitPool.createCommit(prepare, wallet)
+
+      commitPool.addCommit(commit, true)
+
+      expect(commitPool.committeeList[prepare.blockHash]).toBeDefined()
+      expect(commitPool.committeeList[prepare.blockHash].length).toBe(1)
+      expect(commitPool.committeeList[prepare.blockHash][0]).toBe(commit)
+      expect(commitPool.list[prepare.blockHash]).toBeUndefined()
+    })
+
+    it('should add commit to regular list when isCommittee=false', () => {
+      const commit = commitPool.createCommit(prepare, wallet)
+
+      commitPool.addCommit(commit, false)
+
+      expect(commitPool.list[prepare.blockHash]).toBeDefined()
+      expect(commitPool.list[prepare.blockHash].length).toBe(1)
+      expect(commitPool.committeeList[prepare.blockHash]).toBeUndefined()
     })
   })
 
@@ -198,6 +225,29 @@ describe('CommitPool', () => {
       const list = commitPool.getList(prepare.blockHash)
 
       expect(list.length).toBe(3)
+    })
+
+    it('should return committeeList when isCommittee=true', () => {
+      const commit = commitPool.createCommit(prepare, wallet)
+      commitPool.addCommit(commit, true)
+
+      const list = commitPool.getList(prepare.blockHash, true)
+
+      expect(list).toBeDefined()
+      expect(Array.isArray(list)).toBe(true)
+      expect(list.length).toBe(1)
+      expect(list[0]).toBe(commit)
+    })
+
+    it('should return regular list when isCommittee=false', () => {
+      const commit = commitPool.createCommit(prepare, wallet)
+      commitPool.addCommit(commit, false)
+
+      const list = commitPool.getList(prepare.blockHash, false)
+
+      expect(list).toBeDefined()
+      expect(list.length).toBe(1)
+      expect(list[0]).toBe(commit)
     })
   })
 
