@@ -25,7 +25,7 @@ const TRANSACTION_THRESHOLD = Number(process.env.TRANSACTION_THRESHOLD)
 const BLOCK_THRESHOLD = Number(process.env.BLOCK_THRESHOLD)
 const NUMBER_OF_FAULTY_NODES = Number(process.env.NUMBER_OF_FAULTY_NODES)
 const NUMBER_OF_NODES_PER_SHARD = Number(process.env.NUMBER_OF_NODES_PER_SHARD)
-const DEFAULT_TTL = Number(process.env.DEFAULT_TTL)
+const DEFAULT_TTL = Number(process.env.DEFAULT_TTL) || 6
 const CPU_LIMIT = Number(process.env.CPU_LIMIT)
 const HAS_COMMITTEE_SHARD =
   Number(process.env.HAS_COMMITTEE_SHARD) === 1 ? 'true' : 'false'

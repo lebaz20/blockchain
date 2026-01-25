@@ -63,24 +63,66 @@ trap cleanup EXIT INT TERM
 
 # Step 1: Start blockchain using existing start.sh
 echo -e "${BLUE}Step 1: Starting blockchain (using start.sh)...${NC}"
-# Kill start.sh after deployment is complete (before it starts log streaming)
-(
-    ./start.sh &
-    START_PID=$!
+# Run start.sh in background and wait for port forwarding to be ready
+./start.sh > /tmp/start-enhanced.log 2>&1 &
+START_PID=$!
+
+# Wait for port forwarding to actually work (not just be started)
+TIMEOUT=120
+ELAPSED=0
+while true; do
+    # Check if at least one port is responding
+    if curl -s -f http://localhost:3001/health > /dev/null 2>&1; then
+        break
+    fi
     
-    # Wait for port forwarding to be set up
-    sleep 15
+    if [ $ELAPSED -ge $TIMEOUT ]; then
+        echo -e "${RED}✗ Timeout waiting for port forwarding${NC}"
+        kill $START_PID 2>/dev/null || true
+        exit 1
+    fi
     
-    # Kill start.sh to prevent log streaming
-    kill $START_PID 2>/dev/null || true
-) > /dev/null 2>&1
+    sleep 2
+    ELAPSED=$((ELAPSED + 2))
+    echo -ne "  Waiting for port forwarding... ${ELAPSED}s\r"
+done
+
+# Kill start.sh to prevent log streaming (but keep port forwarding alive)
+kill $START_PID 2>/dev/null || true
 
 echo -e "${GREEN}✓ Blockchain deployed and ready${NC}\n"
 
 # Step 2: Wait for blockchain to stabilize
-echo -e "${BLUE}Step 2: Waiting for blockchain to stabilize...${NC}"
-sleep 10
-echo -e "${GREEN}✓ Blockchain ready${NC}\n"
+echo -e "${BLUE}Step 2: Waiting for all nodes to be ready...${NC}"
+TIMEOUT=60
+ELAPSED=0
+READY_COUNT=0
+
+while [ $READY_COUNT -lt $NUMBER_OF_NODES ]; do
+    READY_COUNT=0
+    for ((i=0; i<NUMBER_OF_NODES; i++)); do
+        PORT=$((3001+i))
+        if curl -s -f http://localhost:$PORT/health > /dev/null 2>&1; then
+            READY_COUNT=$((READY_COUNT + 1))
+        fi
+    done
+    
+    if [ $READY_COUNT -eq $NUMBER_OF_NODES ]; then
+        break
+    fi
+    
+    if [ $ELAPSED -ge $TIMEOUT ]; then
+        echo -e "${RED}✗ Timeout waiting for nodes to be ready${NC}"
+        echo -e "${YELLOW}Only $READY_COUNT/$NUMBER_OF_NODES nodes are responding${NC}"
+        exit 1
+    fi
+    
+    sleep 2
+    ELAPSED=$((ELAPSED + 2))
+    echo -ne "  Ready: $READY_COUNT/$NUMBER_OF_NODES nodes... ${ELAPSED}s\r"
+done
+
+echo -e "${GREEN}✓ All $NUMBER_OF_NODES nodes are ready${NC}\n"
 
 # Step 3: Run JMeter test
 echo -e "${BLUE}Step 3: Running JMeter performance test...${NC}"
@@ -116,13 +158,64 @@ echo -e "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
     echo "  - Duration: ${JMETER_DURATION}s"
     echo "  - Target Throughput: ${JMETER_THROUGHPUT} req/s"
     echo ""
-    echo "Blockchain Statistics:"
-    for ((i=0; i<NUMBER_OF_NODES; i++)); do
-        PORT=$((3001+i))
-        echo "  Node $i (port $PORT):"
-        STATS=$(curl -s http://localhost:$PORT/stats 2>/dev/null || echo '{"error": "unavailable"}')
-        echo "    $STATS"
-    done
+    echo "Blockchain Statistics (By Shard):"
+    echo "========================================"
+    
+    # Simple approach: just query one node and display shard stats
+    # All nodes in a shard have the same blockchain state
+    TOTAL_BLOCKS=0
+    TOTAL_TX_IN_BLOCKS=0
+    TOTAL_UNASSIGNED_TX=0
+    
+    PORT=3001
+    STATS=$(curl -s http://localhost:$PORT/stats 2>/dev/null || echo '{}')
+    
+    if [ "$STATS" != "{}" ] && command -v jq &> /dev/null; then
+        # Get all shard indices
+        SHARD_INDICES=$(echo "$STATS" | jq -r '.total | keys[]' 2>/dev/null)
+        
+        for SHARD_IDX in $SHARD_INDICES; do
+            BLOCKS=$(echo "$STATS" | jq -r ".total[\"$SHARD_IDX\"].blocks // 0")
+            TX=$(echo "$STATS" | jq -r ".total[\"$SHARD_IDX\"].transactions // 0")
+            UNASSIGNED=$(echo "$STATS" | jq -r ".total[\"$SHARD_IDX\"].unassignedTransactions // 0")
+            
+            echo ""
+            echo "Shard $SHARD_IDX:"
+            echo "----------------------------------------"
+            echo "  Blocks Created: $BLOCKS"
+            echo "  Transactions in Blocks: $TX"
+            echo "  Unassigned Transactions: $UNASSIGNED"
+            
+            TOTAL_BLOCKS=$((TOTAL_BLOCKS + BLOCKS))
+            TOTAL_TX_IN_BLOCKS=$((TOTAL_TX_IN_BLOCKS + TX))
+            TOTAL_UNASSIGNED_TX=$((TOTAL_UNASSIGNED_TX + UNASSIGNED))
+        done
+    else
+        echo ""
+        echo "(Install jq for detailed shard statistics: brew install jq)"
+        # Fallback: show raw node data
+        for ((i=0; i<NUMBER_OF_NODES; i++)); do
+            PORT=$((3001+i))
+            echo ""
+            echo "Node $i (port $PORT):"
+            STATS=$(curl -s http://localhost:$PORT/stats 2>/dev/null || echo '{"error": "unavailable"}')
+            echo "  $STATS"
+        done
+    fi
+    
+    echo ""
+    echo "========================================"
+    echo "TOTAL (All Shards):"
+    echo "========================================"
+    echo "Total Blocks Created: $TOTAL_BLOCKS"
+    echo "Total Transactions in Blocks: $TOTAL_TX_IN_BLOCKS"
+    echo "Total Unassigned Transactions: $TOTAL_UNASSIGNED_TX"
+    echo ""
+    echo "UNASSIGNED TRANSACTION REASONS:"
+    echo "  - Transaction pool not full (threshold: ${TRANSACTION_THRESHOLD})"
+    echo "  - Consensus not reached for pending blocks"
+    echo "  - Block creation in progress"
+    echo "  - Test duration ended before block finalization"
 } > "${SUMMARY_FILE}"
 
 echo -e "${GREEN}✓ Statistics collected${NC}\n"
@@ -155,6 +248,26 @@ if [ -f "${RESULTS_FILE}" ]; then
             THROUGHPUT=0
         fi
         echo "Throughput (req/s),$THROUGHPUT"
+        
+        # Add blockchain metrics from summary
+        if [ -f "${SUMMARY_FILE}" ]; then
+            JMETER_FIRED=$(grep "Total Transactions Fired by Test:" "${SUMMARY_FILE}" | awk '{print $NF}')
+            BLOCKS=$(grep "Total Blocks Created:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
+            TX_IN_BLOCKS=$(grep "Total Transactions in Blocks:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
+            UNASSIGNED=$(grep "Total Unassigned Transactions:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
+            
+            echo "Transactions Fired by Test,${JMETER_FIRED:-0}"
+            
+            echo "Total Blocks Created,${BLOCKS:-0}"
+            echo "Transactions in Blocks,${TX_IN_BLOCKS:-0}"
+            echo "Unassigned Transactions,${UNASSIGNED:-0}"
+            
+            # Calculate block efficiency
+            if [ "$BLOCKS" -gt 0 ] && [ "$TX_IN_BLOCKS" -gt 0 ]; then
+                AVG_TX_PER_BLOCK=$(echo "scale=2; $TX_IN_BLOCKS / $BLOCKS" | bc)
+                echo "Avg Transactions per Block,$AVG_TX_PER_BLOCK"
+            fi
+        fi
     } > "${STATS_FILE}"
     
     echo -e "${GREEN}✓ Results parsed${NC}\n"

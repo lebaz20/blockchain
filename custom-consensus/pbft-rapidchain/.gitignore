@@ -26,6 +26,16 @@ coverage
 # nyc test coverage
 .nyc_output
 
+# Performance test results
+performance-results/
+*.jtl
+
+# Temporary files
+temp/
+*.tmp
+server.log
+/tmp/start-*.log
+
 # Grunt intermediate storage (https://gruntjs.com/creating-plugins#storing-task-files)
 .grunt
 

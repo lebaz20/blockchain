@@ -168,7 +168,7 @@
         <hashTree/>
       </hashTree>
       <CSVDataSet guiclass="TestBeanGUI" testclass="CSVDataSet" testname="CSV Data Set Config" enabled="true">
-        <stringProp name="filename">/Users/mohamedlabib/www/blockchain/custom-consensus/pbft-sharding-pipelining-shuffling/jmeter_ports.csv</stringProp>
+        <stringProp name="filename">jmeter_ports.csv</stringProp>
         <stringProp name="fileEncoding"></stringProp>
         <stringProp name="variableNames">weightedPort</stringProp>
         <boolProp name="ignoreFirstLine">false</boolProp>
