@@ -13,7 +13,7 @@ describe('RateUtility', () => {
       const before = Math.floor(Date.now() / 60000) * 60000
       const result = RateUtility.nearestMinCreatedAt()
       const after = Math.floor(Date.now() / 60000) * 60000
-      
+
       expect(result).toBeGreaterThanOrEqual(before)
       expect(result).toBeLessThanOrEqual(after)
     })
@@ -21,7 +21,7 @@ describe('RateUtility', () => {
     it('should return same value for times within same minute', () => {
       const time1 = new Date('2026-01-25T12:34:10.000Z').getTime()
       const time2 = new Date('2026-01-25T12:34:50.000Z').getTime()
-      
+
       expect(RateUtility.nearestMinCreatedAt(time1)).toBe(
         RateUtility.nearestMinCreatedAt(time2)
       )
@@ -30,7 +30,7 @@ describe('RateUtility', () => {
     it('should return different values for different minutes', () => {
       const time1 = new Date('2026-01-25T12:34:00.000Z').getTime()
       const time2 = new Date('2026-01-25T12:35:00.000Z').getTime()
-      
+
       expect(RateUtility.nearestMinCreatedAt(time1)).not.toBe(
         RateUtility.nearestMinCreatedAt(time2)
       )
@@ -42,7 +42,7 @@ describe('RateUtility', () => {
       const result = RateUtility.getPreviousMinute()
       const now = Date.now()
       const oneMinute = 60000
-      
+
       expect(result).toBeLessThan(now)
       expect(now - result).toBeLessThanOrEqual(2 * oneMinute)
       expect(now - result).toBeGreaterThan(0)
@@ -51,7 +51,7 @@ describe('RateUtility', () => {
     it('should have zero seconds', () => {
       const result = RateUtility.getPreviousMinute()
       const date = new Date(result)
-      
+
       expect(date.getSeconds()).toBe(0)
       expect(date.getMilliseconds()).toBe(0)
     })
@@ -62,14 +62,14 @@ describe('RateUtility', () => {
       const now = Date.now()
       const elevenMinutesAgo = now - 11 * 60 * 1000
       const fiveMinutesAgo = now - 5 * 60 * 1000
-      
+
       const ratePerMin = {
         [elevenMinutesAgo]: 5,
         [fiveMinutesAgo]: 10
       }
-      
+
       RateUtility.removeOlderEntries(ratePerMin)
-      
+
       expect(ratePerMin[elevenMinutesAgo]).toBeUndefined()
       expect(ratePerMin[fiveMinutesAgo]).toBe(10)
     })
@@ -78,14 +78,14 @@ describe('RateUtility', () => {
       const now = Date.now()
       const nineMinutesAgo = now - 9 * 60 * 1000
       const oneMinuteAgo = now - 1 * 60 * 1000
-      
+
       const ratePerMin = {
         [nineMinutesAgo]: 3,
         [oneMinuteAgo]: 7
       }
-      
+
       RateUtility.removeOlderEntries(ratePerMin)
-      
+
       expect(ratePerMin[nineMinutesAgo]).toBe(3)
       expect(ratePerMin[oneMinuteAgo]).toBe(7)
     })
@@ -101,9 +101,9 @@ describe('RateUtility', () => {
     it('should initialize new minute entry to 1', () => {
       const ratePerMin = {}
       const date = Date.now()
-      
+
       RateUtility.updateRatePerMin(ratePerMin, date)
-      
+
       const key = RateUtility.nearestMinCreatedAt(date)
       expect(ratePerMin[key]).toBe(1)
     })
@@ -112,9 +112,9 @@ describe('RateUtility', () => {
       const date = Date.now()
       const key = RateUtility.nearestMinCreatedAt(date)
       const ratePerMin = { [key]: 5 }
-      
+
       RateUtility.updateRatePerMin(ratePerMin, date)
-      
+
       expect(ratePerMin[key]).toBe(6)
     })
 
@@ -122,20 +122,20 @@ describe('RateUtility', () => {
       const now = Date.now()
       const elevenMinutesAgo = now - 11 * 60 * 1000
       const ratePerMin = { [elevenMinutesAgo]: 10 }
-      
+
       RateUtility.updateRatePerMin(ratePerMin, now)
-      
+
       expect(ratePerMin[elevenMinutesAgo]).toBeUndefined()
     })
 
     it('should handle multiple updates in same minute', () => {
       const ratePerMin = {}
       const date = Date.now()
-      
+
       RateUtility.updateRatePerMin(ratePerMin, date)
       RateUtility.updateRatePerMin(ratePerMin, date + 1000)
       RateUtility.updateRatePerMin(ratePerMin, date + 2000)
-      
+
       const key = RateUtility.nearestMinCreatedAt(date)
       expect(ratePerMin[key]).toBe(3)
     })
@@ -146,18 +146,18 @@ describe('RateUtility', () => {
       const date = Date.now()
       const key = RateUtility.nearestMinCreatedAt(date)
       const ratePerMin = { [key]: 15 }
-      
+
       const result = RateUtility.getRatePerMin(ratePerMin, date)
-      
+
       expect(result).toBe(15)
     })
 
     it('should return 0 for non-existing minute', () => {
       const ratePerMin = {}
       const date = Date.now()
-      
+
       const result = RateUtility.getRatePerMin(ratePerMin, date)
-      
+
       expect(result).toBe(0)
     })
 
@@ -176,12 +176,12 @@ describe('RateUtility', () => {
       const time2 = new Date('2026-01-25T12:35:00.000Z').getTime()
       const key1 = RateUtility.nearestMinCreatedAt(time1)
       const key2 = RateUtility.nearestMinCreatedAt(time2)
-      
+
       const ratePerMin = {
         [key1]: 10,
         [key2]: 20
       }
-      
+
       expect(RateUtility.getRatePerMin(ratePerMin, time1)).toBe(10)
       expect(RateUtility.getRatePerMin(ratePerMin, time2)).toBe(20)
     })

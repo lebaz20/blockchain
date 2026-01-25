@@ -45,7 +45,10 @@ describe('TransactionPool', () => {
 
   describe('addTransaction', () => {
     it('should add transaction to unassigned pool', () => {
-      const transaction = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const transaction = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
 
       transactionPool.addTransaction(transaction)
 
@@ -54,8 +57,14 @@ describe('TransactionPool', () => {
     })
 
     it('should add multiple transactions', () => {
-      const tx1 = new Transaction({ recipient: 'recipient1', amount: 100 }, wallet)
-      const tx2 = new Transaction({ recipient: 'recipient2', amount: 200 }, wallet)
+      const tx1 = new Transaction(
+        { recipient: 'recipient1', amount: 100 },
+        wallet
+      )
+      const tx2 = new Transaction(
+        { recipient: 'recipient2', amount: 200 },
+        wallet
+      )
 
       transactionPool.addTransaction(tx1)
       transactionPool.addTransaction(tx2)
@@ -64,7 +73,10 @@ describe('TransactionPool', () => {
     })
 
     it('should update rate per minute', () => {
-      const transaction = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const transaction = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
 
       transactionPool.addTransaction(transaction)
 
@@ -74,14 +86,20 @@ describe('TransactionPool', () => {
 
   describe('assignTransactions', () => {
     it('should assign transactions to block', () => {
-      const tx1 = new Transaction({ recipient: 'recipient1', amount: 100 }, wallet)
-      const tx2 = new Transaction({ recipient: 'recipient2', amount: 200 }, wallet)
-      
+      const tx1 = new Transaction(
+        { recipient: 'recipient1', amount: 100 },
+        wallet
+      )
+      const tx2 = new Transaction(
+        { recipient: 'recipient2', amount: 200 },
+        wallet
+      )
+
       transactionPool.addTransaction(tx1)
       transactionPool.addTransaction(tx2)
 
       const block = { hash: 'block-hash', data: [tx1, tx2] }
-      
+
       transactionPool.assignTransactions(block)
 
       expect(transactionPool.transactions.unassigned.length).toBe(0)
@@ -90,20 +108,28 @@ describe('TransactionPool', () => {
     })
 
     it('should track assignment time', () => {
-      const tx = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const tx = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
       transactionPool.addTransaction(tx)
 
       const block = { hash: 'block-hash', data: [tx] }
       const beforeTime = Date.now()
-      
+
       transactionPool.assignTransactions(block)
 
       expect(transactionPool.transactionsCreatedAt['block-hash']).toBeDefined()
-      expect(transactionPool.transactionsCreatedAt['block-hash']).toBeGreaterThanOrEqual(beforeTime)
+      expect(
+        transactionPool.transactionsCreatedAt['block-hash']
+      ).toBeGreaterThanOrEqual(beforeTime)
     })
 
     it('should reassign transactions after timeout', () => {
-      const tx = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const tx = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
       transactionPool.addTransaction(tx)
 
       const block = { hash: 'block-hash', data: [tx] }
@@ -119,7 +145,10 @@ describe('TransactionPool', () => {
     })
 
     it('should not reassign if transactions were cleared', () => {
-      const tx = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const tx = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
       transactionPool.addTransaction(tx)
 
       const block = { hash: 'block-hash', data: [tx] }
@@ -132,7 +161,10 @@ describe('TransactionPool', () => {
     })
 
     it('should remove duplicates when reassigning', () => {
-      const tx = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const tx = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
       transactionPool.addTransaction(tx)
 
       const block = { hash: 'block-hash', data: [tx] }
@@ -149,15 +181,21 @@ describe('TransactionPool', () => {
 
   describe('getInflightBlocks', () => {
     it('should return inflight block hashes', () => {
-      const tx1 = new Transaction({ recipient: 'recipient1', amount: 100 }, wallet)
-      const tx2 = new Transaction({ recipient: 'recipient2', amount: 200 }, wallet)
-      
+      const tx1 = new Transaction(
+        { recipient: 'recipient1', amount: 100 },
+        wallet
+      )
+      const tx2 = new Transaction(
+        { recipient: 'recipient2', amount: 200 },
+        wallet
+      )
+
       transactionPool.addTransaction(tx1)
       transactionPool.addTransaction(tx2)
 
       const block1 = { hash: 'hash1', data: [tx1] }
       const block2 = { hash: 'hash2', data: [tx2] }
-      
+
       transactionPool.assignTransactions(block1)
       transactionPool.assignTransactions(block2)
 
@@ -169,7 +207,10 @@ describe('TransactionPool', () => {
     })
 
     it('should exclude specific block hash', () => {
-      const tx = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const tx = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
       transactionPool.addTransaction(tx)
 
       const block = { hash: 'exclude-hash', data: [tx] }
@@ -183,7 +224,10 @@ describe('TransactionPool', () => {
 
   describe('poolFull', () => {
     it('should return false when pool is not full', () => {
-      const tx = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const tx = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
       transactionPool.addTransaction(tx)
 
       expect(transactionPool.poolFull()).toBe(false)
@@ -191,7 +235,10 @@ describe('TransactionPool', () => {
 
     it('should return true when pool reaches threshold', () => {
       for (let i = 0; i < 5; i++) {
-        const tx = new Transaction({ recipient: `recipient${i}`, amount: 100 }, wallet)
+        const tx = new Transaction(
+          { recipient: `recipient${i}`, amount: 100 },
+          wallet
+        )
         transactionPool.addTransaction(tx)
       }
 
@@ -200,7 +247,10 @@ describe('TransactionPool', () => {
 
     it('should return true when pool exceeds threshold', () => {
       for (let i = 0; i < 6; i++) {
-        const tx = new Transaction({ recipient: `recipient${i}`, amount: 100 }, wallet)
+        const tx = new Transaction(
+          { recipient: `recipient${i}`, amount: 100 },
+          wallet
+        )
         transactionPool.addTransaction(tx)
       }
 
@@ -210,13 +260,19 @@ describe('TransactionPool', () => {
 
   describe('verifyTransaction', () => {
     it('should verify valid transaction', () => {
-      const transaction = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const transaction = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
 
       expect(transactionPool.verifyTransaction(transaction)).toBe(true)
     })
 
     it('should reject invalid transaction', () => {
-      const transaction = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const transaction = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
       // Create a properly sized but invalid signature
       transaction.signature = 'a'.repeat(128)
 
@@ -226,20 +282,29 @@ describe('TransactionPool', () => {
 
   describe('transactionExists', () => {
     it('should return false for non-existing transaction', () => {
-      const transaction = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const transaction = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
 
       expect(transactionPool.transactionExists(transaction)).toBe(false)
     })
 
     it('should return true for existing transaction in unassigned', () => {
-      const transaction = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const transaction = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
       transactionPool.addTransaction(transaction)
 
       expect(transactionPool.transactionExists(transaction)).toBe(true)
     })
 
     it('should return true for transaction in assigned block', () => {
-      const transaction = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const transaction = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
       transactionPool.addTransaction(transaction)
 
       const block = { hash: 'hash1', data: [transaction] }
@@ -255,7 +320,10 @@ describe('TransactionPool', () => {
     })
 
     it('should return true for existing hash with transactions', () => {
-      const tx = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const tx = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
       transactionPool.addTransaction(tx)
 
       const block = { hash: 'hash1', data: [tx] }
@@ -273,15 +341,21 @@ describe('TransactionPool', () => {
 
   describe('removeDuplicates', () => {
     it('should remove duplicate transactions from other blocks', () => {
-      const tx1 = new Transaction({ recipient: 'recipient1', amount: 100 }, wallet)
-      const tx2 = new Transaction({ recipient: 'recipient2', amount: 200 }, wallet)
-      
+      const tx1 = new Transaction(
+        { recipient: 'recipient1', amount: 100 },
+        wallet
+      )
+      const tx2 = new Transaction(
+        { recipient: 'recipient2', amount: 200 },
+        wallet
+      )
+
       transactionPool.addTransaction(tx1)
       transactionPool.addTransaction(tx2)
 
       const block1 = { hash: 'hash1', data: [tx1] }
       const block2 = { hash: 'hash2', data: [tx2] }
-      
+
       transactionPool.assignTransactions(block1)
       transactionPool.assignTransactions(block2)
 
@@ -292,7 +366,10 @@ describe('TransactionPool', () => {
     })
 
     it('should remove duplicates from unassigned pool', () => {
-      const tx = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const tx = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
       transactionPool.addTransaction(tx)
       transactionPool.addTransaction(tx) // duplicate
 
@@ -304,7 +381,10 @@ describe('TransactionPool', () => {
 
   describe('clear', () => {
     it('should clear transactions for specific hash', () => {
-      const tx = new Transaction({ recipient: 'recipient', amount: 100 }, wallet)
+      const tx = new Transaction(
+        { recipient: 'recipient', amount: 100 },
+        wallet
+      )
       transactionPool.addTransaction(tx)
 
       const block = { hash: 'hash1', data: [tx] }
@@ -317,9 +397,15 @@ describe('TransactionPool', () => {
     })
 
     it('should remove transactions from unassigned pool', () => {
-      const tx1 = new Transaction({ recipient: 'recipient1', amount: 100 }, wallet)
-      const tx2 = new Transaction({ recipient: 'recipient2', amount: 200 }, wallet)
-      
+      const tx1 = new Transaction(
+        { recipient: 'recipient1', amount: 100 },
+        wallet
+      )
+      const tx2 = new Transaction(
+        { recipient: 'recipient2', amount: 200 },
+        wallet
+      )
+
       transactionPool.addTransaction(tx1)
       transactionPool.addTransaction(tx2)
 

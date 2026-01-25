@@ -97,8 +97,8 @@ describe('PreparePool', () => {
       const prepare = preparePool.createPrepare(block, wallet)
       preparePool.addPrepare(prepare)
 
-      const samePrepare = { 
-        blockHash: block.hash, 
+      const samePrepare = {
+        blockHash: block.hash,
         publicKey: wallet.getPublicKey(),
         signature: 'different-signature'
       }
@@ -110,7 +110,7 @@ describe('PreparePool', () => {
       const wallet2 = new Wallet('different-secret')
       const prepare1 = preparePool.createPrepare(block, wallet)
       const prepare2 = preparePool.createPrepare(block, wallet2)
-      
+
       preparePool.addPrepare(prepare1)
 
       expect(preparePool.existingPrepare(prepare2)).toBe(false)

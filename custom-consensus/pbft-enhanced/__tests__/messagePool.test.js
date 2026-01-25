@@ -57,7 +57,7 @@ describe('MessagePool', () => {
     it('should reset list when creating message for same block', () => {
       messagePool.createMessage(block, wallet)
       const wallet2 = new Wallet('different-secret')
-      
+
       messagePool.createMessage(block, wallet2)
 
       expect(messagePool.list[block.hash].length).toBe(1)
@@ -65,7 +65,7 @@ describe('MessagePool', () => {
 
     it('should create different messages for different blocks', () => {
       const block2 = { hash: 'hash2', data: [] }
-      
+
       const message1 = messagePool.createMessage(block, wallet)
       const message2 = messagePool.createMessage(block2, wallet)
 
@@ -108,10 +108,10 @@ describe('MessagePool', () => {
 
     it('should add multiple messages for same block', () => {
       messagePool.createMessage(block, wallet)
-      
+
       const wallet2 = new Wallet('secret2')
       const wallet3 = new Wallet('secret3')
-      
+
       const message2 = {
         publicKey: wallet2.getPublicKey(),
         blockHash: block.hash,
@@ -160,7 +160,7 @@ describe('MessagePool', () => {
 
     it('should return false for different publicKey', () => {
       messagePool.createMessage(block, wallet)
-      
+
       const wallet2 = new Wallet('different-secret')
       const differentMessage = {
         publicKey: wallet2.getPublicKey(),

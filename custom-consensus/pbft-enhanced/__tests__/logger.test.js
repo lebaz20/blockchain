@@ -94,16 +94,16 @@ describe('Logger', () => {
       const logCall = stdoutWriteSpy.mock.calls[0][0]
       expect(logCall).toContain('[DEBUG]')
       expect(logCall).toContain(message)
-      
+
       delete process.env.DEBUG
     })
 
     it('should not output to stdout when DEBUG is not set', () => {
       delete process.env.DEBUG
       stdoutWriteSpy.mockClear()
-      
+
       logger.debug('Debug message')
-      
+
       expect(stdoutWriteSpy).not.toHaveBeenCalled()
     })
   })
