@@ -75,7 +75,7 @@ const { shards: nodesSubsets, faultyNodes } = getRandomIndicesArrays(
   Array.from({ length: NUMBER_OF_NODES }, (_, index) => index)
 )
 console.log(nodesSubsets, faultyNodes)
-let environmentArray = []
+const environmentArray = []
 // Save environmentVariables to a yml file
 const environmentFile = 'nodesEnv.yml'
 const kubeFile = 'kubeConfig.yml'
@@ -107,7 +107,7 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
         { length: index },
         (_, index_) => `ws://p2p-server-${index_}:${index_ + 5001}`
       )
-      let peersSubset = []
+      const peersSubset = []
       nodesSubset.forEach((index) => {
         // Check if index is within bounds of peers array
         if (index < peers.length && peers[index]) {
@@ -274,7 +274,7 @@ fs.writeFileSync(kubeFile, yaml.dump(k8sConfig))
 const ports = environmentArray.map((environment) => environment.HTTP_PORT)
 const weights = ports.map(() => Math.floor(Math.random() * 10) + 1) // random weight 1-10
 
-let weightedPorts = []
+const weightedPorts = []
 ports.forEach((endpoint, index) => {
   for (let w = 0; w < weights[index]; w++) {
     weightedPorts.push(endpoint)

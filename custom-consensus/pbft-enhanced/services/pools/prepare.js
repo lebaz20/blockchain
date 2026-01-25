@@ -10,7 +10,7 @@ class PreparePool {
   // and adds the prepare message for the current node and
   // returns it
   prepare(block, wallet) {
-    let prepare = this.createPrepare(block, wallet);
+    const prepare = this.createPrepare(block, wallet);
     this.addPrepare(prepare);
     return prepare;
   }

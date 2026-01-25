@@ -71,6 +71,7 @@ class MessageValidator {
    * @param {Object} previousBlock - Previous block
    * @returns {boolean} True if block is valid
    */
+  // eslint-disable-next-line max-params
   static isValidPrePrepare(
     block,
     blockPool,

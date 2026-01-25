@@ -11,14 +11,14 @@ class CommitPool {
   // and adds the commit message for the current node and
   // returns it
   commit(prepare, wallet, isCommittee = false) {
-    let commit = this.createCommit(prepare, wallet);
+    const commit = this.createCommit(prepare, wallet);
     this.addCommit(commit, isCommittee);
     return commit;
   }
 
   // creates a commit message for the given prepare message
   createCommit(prepare, wallet) {
-    let commit = {};
+    const commit = {};
     commit.blockHash = prepare.blockHash;
     commit.publicKey = wallet.getPublicKey();
     commit.signature = wallet.sign(prepare.blockHash);

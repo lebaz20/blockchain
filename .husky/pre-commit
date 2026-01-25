@@ -1,0 +1,33 @@
+#!/usr/bin/env sh
+
+# Get staged JavaScript files for pbft-enhanced
+ENHANCED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep "^custom-consensus/pbft-enhanced/.*\.js$" || true)
+if [ -n "$ENHANCED_FILES" ]; then
+  echo "Running lint checks for pbft-enhanced..."
+  for FILE in $ENHANCED_FILES; do
+    # Strip the custom-consensus/pbft-enhanced/ prefix to get relative path
+    RELATIVE_FILE="${FILE#custom-consensus/pbft-enhanced/}"
+    (cd custom-consensus/pbft-enhanced && npx eslint "$RELATIVE_FILE")
+    if [ $? -ne 0 ]; then
+      echo "❌ ESLint failed for $FILE"
+      exit 1
+    fi
+  done
+fi
+
+# Get staged JavaScript files for pbft-rapidchain
+RAPIDCHAIN_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep "^custom-consensus/pbft-rapidchain/.*\.js$" || true)
+if [ -n "$RAPIDCHAIN_FILES" ]; then
+  echo "Running lint checks for pbft-rapidchain..."
+  for FILE in $RAPIDCHAIN_FILES; do
+    # Strip the custom-consensus/pbft-rapidchain/ prefix to get relative path
+    RELATIVE_FILE="${FILE#custom-consensus/pbft-rapidchain/}"
+    (cd custom-consensus/pbft-rapidchain && npx eslint "$RELATIVE_FILE")
+    if [ $? -ne 0 ]; then
+      echo "❌ ESLint failed for $FILE"
+      exit 1
+    fi
+  done
+fi
+
+echo "✅ All lint checks passed!"

@@ -1,13 +1,9 @@
-// import the ws module
 const WebSocket = require('ws')
 const axios = require('axios')
 const MESSAGE_TYPE = require('../constants/message')
 const logger = require('../utils/logger')
 const TIMEOUTS = require('../constants/timeouts')
-const MessageValidator = require('../utils/messageValidator')
 
-// import the min approval constant which will be used to compare the count the messages
-// import active subset of nodes to use in validation
 const config = require('../config')
 const {
   NODES_SUBSET,
@@ -17,16 +13,13 @@ const {
   IS_FAULTY
 } = config.get()
 
-// declare a p2p server port on which it would listen for messages
-// we will pass the port through command line
 const P2P_PORT = process.env.P2P_PORT || 5001
 
-// the neighboring nodes socket addresses will be passed in command line
-// this statement splits them into an array
 const peers = process.env.PEERS ? process.env.PEERS.split(',') : []
 const core = process.env.CORE
 
 class P2pserver {
+  // eslint-disable-next-line max-params
   constructor(
     blockchain,
     transactionPool,
@@ -51,7 +44,6 @@ class P2pserver {
     this.idaGossip = idaGossip
   }
 
-  // Creates a server on a given port
   listen() {
     const server = new WebSocket.Server({ port: P2P_PORT })
     server.on('connection', (socket, request) => {
@@ -91,7 +83,6 @@ class P2pserver {
     }, TIMEOUTS.RATE_BROADCAST_INTERVAL_MS)
   }
 
-  // connects to a given socket and registers the message handler on it
   connectSocket(socket, port, isFaulty, isCore = false) {
     if (!isCore) {
       this.sockets[port] = {
@@ -109,7 +100,7 @@ class P2pserver {
     return new Promise((resolve) => {
       function checkWebServer() {
         axios
-          .get(url + '/health')
+          .get(`${url  }/health`)
           .then(() => {
             logger.log(`WebServer is open: ${url}`)
             resolve(true)
@@ -270,40 +261,271 @@ class P2pserver {
     })
   }
 
-  // handles any message sent to the current node
-  messageHandler(socket, isCore = false) {
-    // registers message handler
-    socket.on('message', (message) => {
-      if (Buffer.isBuffer(message)) {
-        message = message.toString() // Convert Buffer to string
+  _handleTransaction(data) {
+    if (
+      !this.transactionPool.transactionExists(data.transaction) &&
+      this.transactionPool.verifyTransaction(data.transaction) &&
+      this.validators.isValidValidator(data.transaction.from)
+    ) {
+      if (data.port && data.port in this.sockets) {
+        this.sockets[data.port].isFaulty = data.isFaulty
       }
-      const data = JSON.parse(message)
-      const processedData = this.idaGossip.handleChunk(data)
-      this.parseMessage(processedData, isCore)
+      this.transactionPool.addTransaction(data.transaction)
+      logger.log(
+        P2P_PORT,
+        'TRANSACTION ADDED, TOTAL NOW:',
+        this.transactionPool.transactions.unassigned.length
+      )
+      this.broadcastTransaction(data.port, data.transaction)
+      this.initiateBlockCreation(data.port)
+    }
+  }
+
+  _handlePrePrepare(data) {
+    const { block, previousBlock, blocksCount } = data.data
+    if (
+      !this.blockPool.existingBlock(block) &&
+      this.blockchain.isValidBlock(block, blocksCount, previousBlock)
+    ) {
+      this.blockPool.addBlock(block)
+      this.transactionPool.assignTransactions(block)
+      this.broadcastPrePrepare(data.port, block, blocksCount, previousBlock)
+
+      if (block?.hash) {
+        const prepare = this.preparePool.prepare(block, this.wallet)
+        this.broadcastPrepare(data.port, prepare)
+      }
+    }
+  }
+
+  _handlePrepare(data) {
+    if (
+      !this.preparePool.existingPrepare(data.prepare) &&
+      this.preparePool.isValidPrepare(data.prepare, this.wallet) &&
+      this.validators.isValidValidator(data.prepare.publicKey)
+    ) {
+      this.preparePool.addPrepare(data.prepare)
+      this.broadcastPrepare(data.port, data.prepare)
+
+      if (
+        this.preparePool.list[data.prepare.blockHash].length >= MIN_APPROVALS
+      ) {
+        const commit = this.commitPool.commit(data.prepare, this.wallet)
+        this.broadcastCommit(data.port, commit)
+      }
+    }
+  }
+
+  async _handleCommit(data) {
+    if (
+      !this.commitPool.existingCommit(data.commit) &&
+      this.commitPool.isValidCommit(data.commit) &&
+      this.validators.isValidValidator(data.commit.publicKey)
+    ) {
+      this.commitPool.addCommit(data.commit)
+      this.broadcastCommit(data.port, data.commit)
+
+      const commitReached =
+        this.commitPool.list[data.commit.blockHash].length >= MIN_APPROVALS
+      const blockNotInChain = !this.blockchain.existingBlock(
+        data.commit.blockHash
+      )
+
+      if (commitReached && blockNotInChain) {
+        const result = await this.blockchain.addUpdatedBlock(
+          data.commit.blockHash,
+          this.blockPool,
+          this.preparePool,
+          this.commitPool
+        )
+        if (result !== false) {
+          this.broadcastBlockToCore(result)
+          logger.log(
+            P2P_PORT,
+            'NEW BLOCK ADDED TO BLOCK CHAIN, TOTAL NOW:',
+            this.blockchain.chain[SUBSET_INDEX].length,
+            data.commit.blockHash
+          )
+          const message = this.messagePool.createMessage(
+            this.blockchain.chain[SUBSET_INDEX][
+              this.blockchain.chain[SUBSET_INDEX].length - 1
+            ],
+            this.wallet
+          )
+          this.broadcastRoundChange(data.port, message)
+        } else {
+          logger.error(
+            P2P_PORT,
+            'NEW BLOCK FAILED TO ADD TO BLOCK CHAIN, TOTAL STILL:',
+            this.blockchain.chain[SUBSET_INDEX].length
+          )
+        }
+        const rate = await this.blockchain.getRate(this.sockets)
+        const stats = {
+          total: this.blockchain.getTotal(),
+          rate,
+          unassignedTransactions:
+            this.transactionPool.transactions.unassigned.length
+        }
+        logger.log(
+          P2P_PORT,
+          `P2P STATS FOR #${SUBSET_INDEX}:`,
+          JSON.stringify(stats)
+        )
+      }
+    }
+  }
+
+  _handleRoundChange(data) {
+    if (
+      !this.messagePool.existingMessage(data.message) &&
+      this.messagePool.isValidMessage(data.message) &&
+      this.validators.isValidValidator(data.message.publicKey)
+    ) {
+      this.messagePool.addMessage(data.message)
+      this.broadcastRoundChange(data.port, data.message)
+
+      if (
+        this.messagePool.list[data.message.blockHash] &&
+        this.messagePool.list[data.message.blockHash].length >= MIN_APPROVALS
+      ) {
+        logger.log(
+          P2P_PORT,
+          'TRANSACTION POOL TO BE CLEARED, TOTAL NOW:',
+          this.transactionPool.transactions[data.message.blockHash]?.length
+        )
+        this.transactionPool.clear(data.message.blockHash, data.message.data)
+      }
+    }
+  }
+
+  async _handleBlockFromCore(data, isCore) {
+    const blockNotInChain = !this.blockchain.existingBlock(
+      data.block.hash,
+      data.subsetIndex
+    )
+    const isDifferentShard = data.subsetIndex !== SUBSET_INDEX
+
+    if (blockNotInChain && isDifferentShard && isCore === true) {
+      this.blockchain.addBlock(data.block, data.subsetIndex)
+      const rate = await this.blockchain.getRate(this.sockets)
+      const stats = { total: this.blockchain.getTotal(), rate }
+      logger.log(
+        P2P_PORT,
+        `P2P STATS FOR #${SUBSET_INDEX}:`,
+        JSON.stringify(stats)
+      )
+    }
+  }
+
+  _handleConfigFromCore(data, isCore) {
+    if (isCore === true) {
+      data.config.forEach((item) => {
+        config.set(item.key, item.value)
+      })
+      logger.log(
+        P2P_PORT,
+        `CONFIG UPDATE FOR #${SUBSET_INDEX}:`,
+        JSON.stringify(data.config)
+      )
+    }
+  }
+
+  messageHandler(socket, isCore = false) {
+    socket.on('message', (message) => {
+      try {
+        if (Buffer.isBuffer(message)) {
+          message = message.toString()
+        }
+        const data = JSON.parse(message)
+        const processedData = this.idaGossip.handleChunk(data)
+        this.parseMessage(processedData, isCore)
+      } catch (error) {
+        logger.error('Failed to parse message:', error.message)
+      }
     })
   }
 
-  initiateBlockCreation(port, triggeredByTransaction = true) {
+  _scheduleTimeoutBlockCreation() {
+    clearTimeout(this._blockCreationTimeout)
+    this._blockCreationTimeout = setTimeout(() => {
+      const now = new Date()
+      const isInactive =
+        this.lastTransactionCreatedAt &&
+        now - this.lastTransactionCreatedAt >=
+          TIMEOUTS.TRANSACTION_INACTIVITY_THRESHOLD_MS
+      const hasTransactions =
+        this.transactionPool.transactions.unassigned.length > 0
+
+      if (isInactive && hasTransactions) {
+        this.initiateBlockCreation(P2P_PORT, false)
+      }
+    }, TIMEOUTS.BLOCK_CREATION_TIMEOUT_MS)
+  }
+
+  _canProposeBlock() {
+    const lastUnpersistedBlock =
+      this.blockPool.blocks[this.blockPool.blocks.length - 1]
+    const inflightBlocks = this.transactionPool.getInflightBlocks()
+
+    if (inflightBlocks.length > 1) {
+      return this.preparePool.isBlockPrepared(lastUnpersistedBlock, this.wallet)
+    }
+    return true
+  }
+
+  _createAndBroadcastBlock(port) {
+    const lastUnpersistedBlock =
+      this.blockPool.blocks[this.blockPool.blocks.length - 1]
+    const inflightBlocks = this.transactionPool.getInflightBlocks()
+    const previousBlock =
+      inflightBlocks.length > 1 ? lastUnpersistedBlock : undefined
+    const transactionsBatch =
+      this.transactionPool.transactions.unassigned.splice(
+        0,
+        TRANSACTION_THRESHOLD
+      )
+    const block = this.blockchain.createBlock(
+      transactionsBatch,
+      this.wallet,
+      previousBlock
+    )
+
+    logger.log(
+      P2P_PORT,
+      'CREATED BLOCK',
+      JSON.stringify({
+        lastHash: block.lastHash,
+        hash: block.hash,
+        data: block.data
+      })
+    )
+
+    this.transactionPool.assignTransactions(block)
+    this.broadcastPrePrepare(
+      port,
+      block,
+      this.blockchain.chain[SUBSET_INDEX].length,
+      previousBlock
+    )
+  }
+
+  initiateBlockCreation(port, _triggeredByTransaction = true) {
     this.lastTransactionCreatedAt = new Date()
     const thresholdReached = this.transactionPool.poolFull()
-    // check if limit reached
-    if (!IS_FAULTY && (thresholdReached || !triggeredByTransaction)) {
+    if (!IS_FAULTY && (thresholdReached || !_triggeredByTransaction)) {
       logger.log(
         P2P_PORT,
         'THRESHOLD REACHED, TOTAL NOW:',
         this.transactionPool.transactions.unassigned.length
       )
-      // check the current node is the proposer
-      let readyToPropose = true
-      const lastUnpersistedBlock =
-        this.blockPool.blocks[this.blockPool.blocks.length - 1]
-      if (this.transactionPool.getInflightBlocks().length > 1) {
-        readyToPropose = this.preparePool.isBlockPrepared(
-          lastUnpersistedBlock,
-          this.wallet
-        )
-      }
+      const readyToPropose = this._canProposeBlock()
       const proposerObject = this.blockchain.getProposer()
+      const inflightBlocks = this.transactionPool.getInflightBlocks()
+      const isProposer = proposerObject.proposer === this.wallet.getPublicKey()
+      const canCreateBlock =
+        isProposer && readyToPropose && inflightBlocks.length <= 4
+
       logger.log(
         P2P_PORT,
         'PROPOSE BLOCK CONDITION',
@@ -311,52 +533,16 @@ class P2pserver {
         proposerObject.proposerIndex,
         NODES_SUBSET,
         'is proposer:',
-        proposerObject.proposer == this.wallet.getPublicKey(),
+        isProposer,
         'is ready to propose:',
         readyToPropose,
         'inflight blocks:',
-        this.transactionPool.getInflightBlocks()
+        inflightBlocks
       )
-      if (
-        proposerObject.proposer == this.wallet.getPublicKey() &&
-        readyToPropose &&
-        this.transactionPool.getInflightBlocks().length <= 4
-      ) {
-        logger.log(P2P_PORT, 'PROPOSING BLOCK')
-        // if the node is the proposer, create a block and broadcast it
-        const previousBlock =
-          this.transactionPool.getInflightBlocks().length > 1
-            ? lastUnpersistedBlock
-            : undefined
-        const transactionsBatch =
-          this.transactionPool.transactions.unassigned.splice(
-            0,
-            TRANSACTION_THRESHOLD
-          )
-        const block = this.blockchain.createBlock(
-          transactionsBatch,
-          this.wallet,
-          previousBlock
-        )
-        logger.log(
-          P2P_PORT,
-          'CREATED BLOCK',
-          JSON.stringify({
-            lastHash: block.lastHash,
-            hash: block.hash,
-            data: block.data
-          })
-        )
-        // assign block transactions to the block
-        // Release assignment after x time in case block creation doesn't succeed
-        this.transactionPool.assignTransactions(block)
 
-        this.broadcastPrePrepare(
-          port,
-          block,
-          this.blockchain.chain[SUBSET_INDEX].length,
-          previousBlock
-        )
+      if (canCreateBlock) {
+        logger.log(P2P_PORT, 'PROPOSING BLOCK')
+        this._createAndBroadcastBlock(port)
       }
     } else {
       logger.log(
@@ -366,235 +552,37 @@ class P2pserver {
       )
     }
 
-    // If lastTransactionCreatedAt is more than 1 minute ago, run after timeout, else run immediately
-    // Debounce block creation: only call after timeout if not triggered by normal traffic
-    clearTimeout(this._blockCreationTimeout)
-    this._blockCreationTimeout = setTimeout(() => {
-      const now = new Date()
-
-      // If no new transaction has triggered initiateBlockCreation in the last 8s, call it manually
-      if (
-        this.lastTransactionCreatedAt &&
-        now - this.lastTransactionCreatedAt >=
-          TIMEOUTS.TRANSACTION_INACTIVITY_THRESHOLD_MS &&
-        this.transactionPool.transactions.unassigned.length > 0
-      ) {
-        this.initiateBlockCreation(P2P_PORT, false)
-      }
-    }, TIMEOUTS.BLOCK_CREATION_TIMEOUT_MS)
+    this._scheduleTimeoutBlockCreation()
   }
 
-  /**
-   * Parses incoming P2P messages and delegates to appropriate handlers
-   * @param {Object} data - Message data
-   * @param {boolean} isCore - Whether message is from core node
-   */
   async parseMessage(data, isCore) {
     logger.log(P2P_PORT, 'RECEIVED', data.type, data.port)
 
     if (IS_FAULTY && ![MESSAGE_TYPE.transaction].includes(data.type)) {
       return
     }
-    // Delegate to specific message handlers
+
     switch (data.type) {
       case MESSAGE_TYPE.transaction:
-        // check if transactions is valid
-        if (
-          !this.transactionPool.transactionExists(data.transaction) &&
-          this.transactionPool.verifyTransaction(data.transaction) &&
-          this.validators.isValidValidator(data.transaction.from)
-        ) {
-          if (data.port && data.port in this.sockets) {
-            this.sockets[data.port].isFaulty = data.isFaulty
-          }
-          this.transactionPool.addTransaction(data.transaction)
-          logger.log(
-            P2P_PORT,
-            'TRANSACTION ADDED, TOTAL NOW:',
-            this.transactionPool.transactions.unassigned.length
-          )
-          // send transactions to other nodes
-          this.broadcastTransaction(data.port, data.transaction)
-
-          this.initiateBlockCreation(data.port)
-        }
+        this._handleTransaction(data)
         break
-      case MESSAGE_TYPE.pre_prepare: {
-        const { block, previousBlock, blocksCount } = data.data
-        // check if block is valid
-        if (
-          !this.blockPool.existingBlock(block) &&
-          this.blockchain.isValidBlock(block, blocksCount, previousBlock)
-        ) {
-          // add block to pool
-          this.blockPool.addBlock(block)
-
-          // assign block transactions to the block
-          // Release assignment after x time in case block creation doesn't succeed
-          this.transactionPool.assignTransactions(block)
-
-          // send to other nodes
-          this.broadcastPrePrepare(data.port, block, blocksCount, previousBlock)
-
-          if (block?.hash) {
-            // create and broadcast a prepare message
-            let prepare = this.preparePool.prepare(block, this.wallet)
-            this.broadcastPrepare(data.port, prepare)
-          }
-        }
+      case MESSAGE_TYPE.pre_prepare:
+        this._handlePrePrepare(data)
         break
-      }
       case MESSAGE_TYPE.prepare:
-        // check if the prepare message is valid
-        if (
-          !this.preparePool.existingPrepare(data.prepare) &&
-          this.preparePool.isValidPrepare(data.prepare, this.wallet) &&
-          this.validators.isValidValidator(data.prepare.publicKey)
-        ) {
-          // add prepare message to the pool
-          this.preparePool.addPrepare(data.prepare)
-
-          // send to other nodes
-          this.broadcastPrepare(data.port, data.prepare)
-
-          // if no of prepare messages reaches minimum required
-          // send commit message
-          if (
-            this.preparePool.list[data.prepare.blockHash].length >=
-            MIN_APPROVALS
-          ) {
-            let commit = this.commitPool.commit(data.prepare, this.wallet)
-            this.broadcastCommit(data.port, commit)
-          }
-        }
+        this._handlePrepare(data)
         break
       case MESSAGE_TYPE.commit:
-        // check the validity commit messages
-        if (
-          !this.commitPool.existingCommit(data.commit) &&
-          this.commitPool.isValidCommit(data.commit) &&
-          this.validators.isValidValidator(data.commit.publicKey)
-        ) {
-          // add to pool
-          this.commitPool.addCommit(data.commit)
-
-          // send to other nodes
-          this.broadcastCommit(data.port, data.commit)
-
-          // if no of commit messages reaches minimum required
-          // add updated block to chain
-          if (
-            this.commitPool.list[data.commit.blockHash].length >=
-              MIN_APPROVALS &&
-            !this.blockchain.existingBlock(data.commit.blockHash)
-          ) {
-            const result = await this.blockchain.addUpdatedBlock(
-              data.commit.blockHash,
-              this.blockPool,
-              this.preparePool,
-              this.commitPool
-            )
-            if (result !== false) {
-              this.broadcastBlockToCore(result)
-              logger.log(
-                P2P_PORT,
-                'NEW BLOCK ADDED TO BLOCK CHAIN, TOTAL NOW:',
-                this.blockchain.chain[SUBSET_INDEX].length,
-                data.commit.blockHash
-              )
-              // Send a round change message to nodes
-              let message = this.messagePool.createMessage(
-                this.blockchain.chain[SUBSET_INDEX][
-                  this.blockchain.chain[SUBSET_INDEX].length - 1
-                ],
-                this.wallet
-              )
-              this.broadcastRoundChange(data.port, message)
-            } else {
-              logger.error(
-                P2P_PORT,
-                'NEW BLOCK FAILED TO ADD TO BLOCK CHAIN, TOTAL STILL:',
-                this.blockchain.chain[SUBSET_INDEX].length
-              )
-            }
-            const rate = await this.blockchain.getRate(this.sockets)
-            const stats = {
-              total: this.blockchain.getTotal(),
-              rate,
-              unassignedTransactions:
-                this.transactionPool.transactions.unassigned.length
-            }
-            logger.log(
-              P2P_PORT,
-              `P2P STATS FOR #${SUBSET_INDEX}:`,
-              JSON.stringify(stats)
-            )
-          }
-        }
+        await this._handleCommit(data)
         break
-
       case MESSAGE_TYPE.round_change:
-        // check the validity of the round change message
-        if (
-          !this.messagePool.existingMessage(data.message) &&
-          this.messagePool.isValidMessage(data.message) &&
-          this.validators.isValidValidator(data.message.publicKey)
-        ) {
-          // add to pool
-          this.messagePool.addMessage(data.message)
-
-          // send to other nodes
-          this.broadcastRoundChange(data.port, data.message)
-
-          // if enough messages are received, clear the pools
-          if (
-            this.messagePool.list[data.message.blockHash] &&
-            this.messagePool.list[data.message.blockHash].length >=
-              MIN_APPROVALS
-          ) {
-            logger.log(
-              P2P_PORT,
-              'TRANSACTION POOL TO BE CLEARED, TOTAL NOW:',
-              this.transactionPool.transactions[data.message.blockHash]?.length
-            )
-            this.transactionPool.clear(
-              data.message.blockHash,
-              data.message.data
-            )
-          }
-        }
+        this._handleRoundChange(data)
         break
-
       case MESSAGE_TYPE.block_from_core:
-        // add updated block to chain
-        if (
-          !this.blockchain.existingBlock(data.block.hash, data.subsetIndex) &&
-          data.subsetIndex != SUBSET_INDEX &&
-          isCore === true
-        ) {
-          this.blockchain.addBlock(data.block, data.subsetIndex)
-          const rate = await this.blockchain.getRate(this.sockets)
-          const stats = { total: this.blockchain.getTotal(), rate }
-          logger.log(
-            P2P_PORT,
-            `P2P STATS FOR #${SUBSET_INDEX}:`,
-            JSON.stringify(stats)
-          )
-        }
+        await this._handleBlockFromCore(data, isCore)
         break
-
       case MESSAGE_TYPE.config_from_core:
-        // update config from core
-        if (isCore === true) {
-          data.config.forEach((item) => {
-            config.set(item.key, item.value)
-          })
-          logger.log(
-            P2P_PORT,
-            `CONFIG UPDATE FOR #${SUBSET_INDEX}:`,
-            JSON.stringify(data.config)
-          )
-        }
+        this._handleConfigFromCore(data, isCore)
         break
     }
   }

@@ -28,18 +28,72 @@ export default defineConfig([
   pluginPromise.configs['flat/recommended'],
   {
     rules: {
+      // Clean Code: Function Complexity (adapted for blockchain consensus)
+      complexity: ['warn', 20],
+      'max-depth': ['warn', 4],
+      'max-lines-per-function': [
+        'warn',
+        { max: 100, skipComments: true, skipBlankLines: true }
+      ],
+      'max-params': ['error', 4],
+      'max-statements': ['warn', 30],
+
+      // Clean Code: Naming Conventions
+      camelcase: [
+        'error',
+        {
+          properties: 'always',
+          ignoreDestructuring: false,
+          allow: ['^[A-Z_]+$']
+        }
+      ],
+      'id-length': ['error', { min: 1, exceptions: ['_'] }],
+
+      // Clean Code: Code Quality
+      'no-console': 'off',
+      'no-var': 'error',
+      'prefer-const': 'error',
+      'prefer-template': 'warn',
+      'prefer-arrow-callback': 'warn',
+      'no-magic-numbers': 'off',
+      eqeqeq: ['error', 'always'],
+      'no-nested-ternary': 'error',
+      'no-return-await': 'error',
+
+      // Clean Code: Error Handling
+      'no-throw-literal': 'error',
+      'prefer-promise-reject-errors': 'error',
+      'no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+
+      // Clean Code: Comments
+      'no-inline-comments': 'off',
+      'no-warning-comments': 'off',
+
+      // SonarJS: Adjusted for Clean Code
       'sonarjs/x-powered-by': 'off',
       'sonarjs/todo-tag': 'off',
       'sonarjs/no-small-switch': 'off',
       'sonarjs/pseudo-random': 'off',
       'sonarjs/no-os-command-from-path': 'off',
-      'sonarjs/cognitive-complexity': 'off',
-      'unicorn/prevent-abbreviations': [
-        'error',
-        {
-          allowList: { Param: true, Req: true, Res: true }
-        }
-      ]
+      'sonarjs/cognitive-complexity': ['warn', 25],
+      'sonarjs/no-duplicate-string': ['warn', { threshold: 10 }],
+      'sonarjs/no-identical-functions': 'warn',
+
+      // Unicorn: Clean Code Enhancements
+      'unicorn/prevent-abbreviations': 'off',
+      'unicorn/no-null': 'off',
+      'unicorn/prefer-ternary': 'off',
+      'unicorn/explicit-length-check': 'off',
+      'unicorn/no-array-reduce': 'off',
+
+      // Promise: Async Best Practices (relaxed for legacy patterns)
+      'promise/prefer-await-to-then': 'off',
+      'promise/prefer-await-to-callbacks': 'off',
+
+      // Import: Module Organization
+      'import/order': 'off',
+      'import/newline-after-import': 'off',
+      'import/no-duplicates': 'error'
     }
   }
 ])

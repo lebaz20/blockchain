@@ -9,7 +9,7 @@ class MessagePool {
 
   // creates a round change message for the given block hash
   createMessage(block, wallet) {
-    let roundChange = {
+    const roundChange = {
       publicKey: wallet.getPublicKey(),
       message: this.message,
       blockHash: block.hash,
