@@ -1,6 +1,5 @@
 ---
-applyTo:
-  - "**/*.js"
+applyTo: "**/*.js"
 description: JavaScript and Node.js development standards for distributed blockchain systems
 ---
 

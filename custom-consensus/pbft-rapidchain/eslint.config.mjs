@@ -95,5 +95,22 @@ export default defineConfig([
       'import/newline-after-import': 'off',
       'import/no-duplicates': 'error'
     }
+  },
+  {
+    files: ['**/__tests__/**/*.js', '**/*.test.js'],
+    languageOptions: {
+      globals: {
+        ...globals.jest
+      }
+    },
+    rules: {
+      'no-magic-numbers': 'off',
+      'max-lines-per-function': 'off',
+      'max-statements': 'off',
+      'sonarjs/no-duplicate-string': 'off',
+      'no-unused-vars': 'off',
+      'sonarjs/no-unused-vars': 'off',
+      'sonarjs/no-dead-store': 'off'
+    }
   }
 ])

@@ -3,9 +3,8 @@
 # Get staged JavaScript files for pbft-enhanced
 ENHANCED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep "^custom-consensus/pbft-enhanced/.*\.js$" || true)
 if [ -n "$ENHANCED_FILES" ]; then
-  echo "Running lint checks for pbft-enhanced..."
+  echo "🔍 Running lint checks for pbft-enhanced..."
   for FILE in $ENHANCED_FILES; do
-    # Strip the custom-consensus/pbft-enhanced/ prefix to get relative path
     RELATIVE_FILE="${FILE#custom-consensus/pbft-enhanced/}"
     (cd custom-consensus/pbft-enhanced && npx eslint "$RELATIVE_FILE")
     if [ $? -ne 0 ]; then
@@ -13,14 +12,21 @@ if [ -n "$ENHANCED_FILES" ]; then
       exit 1
     fi
   done
+  
+  # Run tests for all changes
+  echo "🧪 Running tests for pbft-enhanced..."
+  (cd custom-consensus/pbft-enhanced && yarn test --bail)
+  if [ $? -ne 0 ]; then
+    echo "❌ Tests failed for pbft-enhanced"
+    exit 1
+  fi
 fi
 
 # Get staged JavaScript files for pbft-rapidchain
 RAPIDCHAIN_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep "^custom-consensus/pbft-rapidchain/.*\.js$" || true)
 if [ -n "$RAPIDCHAIN_FILES" ]; then
-  echo "Running lint checks for pbft-rapidchain..."
+  echo "🔍 Running lint checks for pbft-rapidchain..."
   for FILE in $RAPIDCHAIN_FILES; do
-    # Strip the custom-consensus/pbft-rapidchain/ prefix to get relative path
     RELATIVE_FILE="${FILE#custom-consensus/pbft-rapidchain/}"
     (cd custom-consensus/pbft-rapidchain && npx eslint "$RELATIVE_FILE")
     if [ $? -ne 0 ]; then
@@ -28,6 +34,14 @@ if [ -n "$RAPIDCHAIN_FILES" ]; then
       exit 1
     fi
   done
+  
+  # Run tests for all changes
+  echo "🧪 Running tests for pbft-rapidchain..."
+  (cd custom-consensus/pbft-rapidchain && yarn test --bail)
+  if [ $? -ne 0 ]; then
+    echo "❌ Tests failed for pbft-rapidchain"
+    exit 1
+  fi
 fi
 
-echo "✅ All lint checks passed!"
+echo "✅ All lint checks and tests passed!"

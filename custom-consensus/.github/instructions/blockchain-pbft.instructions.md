@@ -1,7 +1,5 @@
 ---
-applyTo:
-  - "**/*.js"
-  - "**/*.md"
+applyTo: "**/*.{js,md}"
 description: Instructions for PBFT blockchain implementation with RapidChain and IDA gossip
 ---
 
