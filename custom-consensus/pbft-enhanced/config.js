@@ -21,10 +21,10 @@ function loadConfig() {
   const NUMBER_OF_NODES_PER_SHARD = process.env.NUMBER_OF_NODES_PER_SHARD
     ? parseInt(process.env.NUMBER_OF_NODES_PER_SHARD, 10)
     : 4
- 
+
   const DEFAULT_TTL = process.env.DEFAULT_TTL
     ? parseInt(process.env.DEFAULT_TTL, 10)
-    : 6;
+    : 6
   const NUMBER_OF_NODES = process.env.NUMBER_OF_NODES
     ? parseInt(process.env.NUMBER_OF_NODES, 10)
     : 8
@@ -32,14 +32,15 @@ function loadConfig() {
     ? JSON.parse(process.env.NODES_SUBSET)
     : []
 
-  const SHOULD_REDIRECT_FROM_FAULTY_NODES = process.env.SHOULD_REDIRECT_FROM_FAULTY_NODES === 'true';
-  const IS_FAULTY = process.env.IS_FAULTY === 'true';
+  const SHOULD_REDIRECT_FROM_FAULTY_NODES =
+    process.env.SHOULD_REDIRECT_FROM_FAULTY_NODES === 'true'
+  const IS_FAULTY = process.env.IS_FAULTY === 'true'
 
   // improve performance by using a subset of nodes in the network
   const NUMBER_OF_FAULTY_NODES = process.env.NUMBER_OF_FAULTY_NODES || 0
 
   // Minimum number of positive votes required for the message/block to be valid
-  const MIN_APPROVALS = 2 * (NUMBER_OF_NODES_PER_SHARD / 3);
+  const MIN_APPROVALS = 2 * (NUMBER_OF_NODES_PER_SHARD / 3)
 
   // SUBSET INDEX
   const SUBSET_INDEX = process.env.SUBSET_INDEX ?? 'SUBSET1'

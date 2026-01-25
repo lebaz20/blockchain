@@ -126,12 +126,14 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
       let peersSubset = []
       let committeePeersSubset = []
       committeeSubset.forEach((index) => {
-        if (index in peers) {
+        // Check if index is within bounds of peers array
+        if (index < peers.length && peers[index]) {
           committeePeersSubset.push(peers[index])
         }
       })
       nodesSubset.forEach((index) => {
-        if (index in peers) {
+        // Check if index is within bounds of peers array
+        if (index < peers.length && peers[index]) {
           peersSubset.push(peers[index])
         }
       })

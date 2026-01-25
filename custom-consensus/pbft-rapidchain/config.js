@@ -24,10 +24,10 @@ function loadConfig() {
   const NUMBER_OF_NODES_PER_SHARD = process.env.NUMBER_OF_NODES_PER_SHARD
     ? parseInt(process.env.NUMBER_OF_NODES_PER_SHARD, 10)
     : 4
- 
+
   const DEFAULT_TTL = process.env.DEFAULT_TTL
     ? parseInt(process.env.DEFAULT_TTL, 10)
-    : 6;
+    : 6
   const NUMBER_OF_NODES = process.env.NUMBER_OF_NODES
     ? parseInt(process.env.NUMBER_OF_NODES, 10)
     : 8
@@ -37,22 +37,26 @@ function loadConfig() {
   const COMMITTEE_SUBSET = process.env.COMMITTEE_SUBSET
     ? JSON.parse(process.env.COMMITTEE_SUBSET)
     : []
-  const COMMITTEE_PEERS = process.env.COMMITTEE_PEERS ? process.env.COMMITTEE_PEERS.split(",") : [];
-  const PEERS = process.env.PEERS ? process.env.PEERS.split(",") : [];
-  const CORE = process.env.CORE;
+  const COMMITTEE_PEERS = process.env.COMMITTEE_PEERS
+    ? process.env.COMMITTEE_PEERS.split(',')
+    : []
+  const PEERS = process.env.PEERS ? process.env.PEERS.split(',') : []
+  const CORE = process.env.CORE
 
-  const SHOULD_REDIRECT_FROM_FAULTY_NODES = process.env.SHOULD_REDIRECT_FROM_FAULTY_NODES === 'true';
-  const IS_FAULTY = process.env.IS_FAULTY === 'true';
+  const SHOULD_REDIRECT_FROM_FAULTY_NODES =
+    process.env.SHOULD_REDIRECT_FROM_FAULTY_NODES === 'true'
+  const IS_FAULTY = process.env.IS_FAULTY === 'true'
 
   // improve performance by using a subset of nodes in the network
   const NUMBER_OF_FAULTY_NODES = process.env.NUMBER_OF_FAULTY_NODES || 0
 
   // Minimum number of positive votes required for the message/block to be valid
-  const MIN_APPROVALS = 2 * (NUMBER_OF_NODES_PER_SHARD / 3);
+  const MIN_APPROVALS = 2 * (NUMBER_OF_NODES_PER_SHARD / 3)
 
   // SUBSET INDEX
   const SUBSET_INDEX = process.env.SUBSET_INDEX ?? 'SUBSET1'
-  const COMMITTEE_SUBSET_INDEX = process.env.COMMITTEE_SUBSET_INDEX ?? 'SUBSET_COMMITTEE'
+  const COMMITTEE_SUBSET_INDEX =
+    process.env.COMMITTEE_SUBSET_INDEX ?? 'SUBSET_COMMITTEE'
 
   // CPU limit for each node in the network
   const CPU_LIMIT = process.env.CPU_LIMIT ?? '1'

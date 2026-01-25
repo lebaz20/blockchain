@@ -1,22 +1,10 @@
 // import the ws module
 const WebSocket = require("ws");
-const fs = require("fs");
 const axios = require('axios');
 const MESSAGE_TYPE = require("../constants/message");
-
-// Create a write stream to your desired log file
-const logStream = fs.createWriteStream("server.log", { flags: "a" }); // 'a' = append
-
-// Redirect console.log and console.error
-console.log = function (...arguments_) {
-  logStream.write(`[LOG ${new Date().toISOString()}] ${arguments_.join(" ")}\n`);
-  process.stdout.write(`[LOG] ${arguments_.join(" ")}\n`); // Optional: also log to terminal
-};
-
-console.error = function (...arguments_) {
-  logStream.write(`[ERROR ${new Date().toISOString()}] ${arguments_.join(" ")}\n`);
-  process.stderr.write(`[ERROR] ${arguments_.join(" ")}\n`);
-};
+const TIMEOUTS = require("../constants/timeouts");
+const logger = require("../utils/logger");
+const MessageValidator = require("../utils/messageValidator");
 
 // import the min approval constant which will be used to compare the count the messages
 // import active subset of nodes to use in validation
@@ -69,7 +57,7 @@ class P2pserver {
       const isFaulty = parsedUrl.searchParams.get("isFaulty");
       const isCommittee = parsedUrl.searchParams.get("isCommittee");
       const isCommitteeFlag = isCommittee === 'true'
-      console.log(
+      logger.log(
         `new connection from ${port} to ${P2P_PORT}`,
       );
       this.connectSocket(socket, port, isFaulty === 'true', false, isCommitteeFlag);
@@ -85,12 +73,12 @@ class P2pserver {
     setInterval(async () => {
       const rate = await this.blockchain.getRate(this.sockets.peers);
       const total = this.blockchain.getTotal();
-      console.log(`PEERS ${SUBSET_INDEX}`, P2P_PORT, IS_FAULTY, JSON.stringify(Object.keys(this.sockets.peers).map((port) => ({ port, isFaulty: this.sockets.peers[port].isFaulty}))));
-      console.log(`COMMITTEE PEERS`, P2P_PORT, JSON.stringify(Object.keys(this.sockets.committeePeers).map((port) => ({ port }))));
-      console.log(`RATE INTERVAL BROADCAST ${SUBSET_INDEX}`, JSON.stringify(rate));
-      console.log(`TOTAL INTERVAL BROADCAST ${SUBSET_INDEX}`, JSON.stringify(total));
+      logger.log(`PEERS ${SUBSET_INDEX}`, P2P_PORT, IS_FAULTY, JSON.stringify(Object.keys(this.sockets.peers).map((port) => ({ port, isFaulty: this.sockets.peers[port].isFaulty}))));
+      logger.log(`COMMITTEE PEERS`, P2P_PORT, JSON.stringify(Object.keys(this.sockets.committeePeers).map((port) => ({ port }))));
+      logger.log(`RATE INTERVAL BROADCAST ${SUBSET_INDEX}`, JSON.stringify(rate));
+      logger.log(`TOTAL INTERVAL BROADCAST ${SUBSET_INDEX}`, JSON.stringify(total));
       this.broadcastRateToCore(rate, total);
-    }, 60000); // every 1 minute
+    }, TIMEOUTS.RATE_BROADCAST_INTERVAL_MS);
   }
 
   // connects to a given socket and registers the message handler on it
@@ -124,13 +112,12 @@ class P2pserver {
         axios
           .get(url + '/health')
           .then(() => {
-            console.log(`WebServer is open: ${url}`)
+            logger.log(`WebServer is open: ${url}`)
             resolve(true)
             return true
           })
           .catch(() => {
-            // console.log(`WebServer ${url} not available, retrying...`);
-            setTimeout(checkWebServer, retryInterval + 1000)
+            setTimeout(checkWebServer, retryInterval + TIMEOUTS.HEALTH_CHECK_RETRY_MS)
           })
       }
   
@@ -151,11 +138,11 @@ class P2pserver {
         `${peer}?port=${P2P_PORT}&isFaulty=${IS_FAULTY ? 'true' : 'false'}&subsetIndex=${SUBSET_INDEX}&httpPort=${process.env.HTTP_PORT}`,
         );
         socket.on("error", (error) => {
-          console.error(`Failed to connect to peer. Retrying in 5s...`, error);
-          setTimeout(connectPeer, 5000);
+          logger.error(`Failed to connect to peer. Retrying in 5s...`, error);
+          setTimeout(connectPeer, TIMEOUTS.PEER_RECONNECT_DELAY_MS);
         });
         socket.on("open", () => {
-          console.log(
+          logger.log(
             `new connection from inside ${P2P_PORT} to ${peer.split(":")[2]}`,
           );
           this.connectSocket(socket, peer.split(":")[2], false, false, false);
@@ -178,11 +165,11 @@ class P2pserver {
         `${committeePeer}?port=${P2P_PORT}&isFaulty=${IS_FAULTY ? 'true' : 'false'}&isCommittee=true&subsetIndex=${SUBSET_INDEX}&httpPort=${process.env.HTTP_PORT}`,
         );
         socket.on("error", (error) => {
-          console.error(`Failed to connect to committee peer. Retrying in 5s...`, error);
-          setTimeout(connectCommitteePeer, 5000);
+          logger.error(`Failed to connect to committee peer. Retrying in 5s...`, error);
+          setTimeout(connectCommitteePeer, TIMEOUTS.PEER_RECONNECT_DELAY_MS);
         });
         socket.on("open", () => {
-          console.log(
+          logger.log(
             `new connection from inside ${P2P_PORT} to ${committeePeer.split(":")[2]}`,
           );
           this.connectSocket(socket, committeePeer.split(":")[2], false, false, true);
@@ -199,11 +186,11 @@ class P2pserver {
       `${CORE}?port=${P2P_PORT}&isCommittee=${isCommittee ? 'true' : 'false'}&subsetIndex=${SUBSET_INDEX}&httpPort=${process.env.HTTP_PORT}`,
       );
       socket.on("error", (error) => {
-      console.error(`Failed to connect to core. Retrying in 5s...`, error);
-      setTimeout(connectCore, 5000);
+      logger.error(`Failed to connect to core. Retrying in 5s...`, error);
+      setTimeout(connectCore, TIMEOUTS.PEER_RECONNECT_DELAY_MS);
       });
       socket.on("open", () => {
-      console.log(
+      logger.log(
         `new connection from inside ${P2P_PORT} to ${CORE.split(":")[2]}`,
       );
       this.connectSocket(socket, CORE.split(":")[2], false, true, isCommittee);
@@ -332,13 +319,22 @@ class P2pserver {
       this.lastTransactionCreatedAt = new Date();
     }
     const thresholdReached = this.transactionPool.poolFull(isCommittee);
-    // check if limit reached
-    if (!IS_FAULTY && (thresholdReached || !triggeredByTransaction)) {
-      console.log(
-        P2P_PORT,
-        "THRESHOLD REACHED, TOTAL NOW:",
-        isCommittee ? this.transactionPool.committeeTransactions.unassigned.length : this.transactionPool.transactions.unassigned.length,
-      );
+    
+    // Early return if node is faulty or threshold not reached
+    if (IS_FAULTY || !thresholdReached) {
+      if (!IS_FAULTY && !thresholdReached) {
+        logger.log(P2P_PORT, "Transaction Threshold NOT REACHED, TOTAL UNASSIGNED NOW:", isCommittee ? this.transactionPool.committeeTransactions.unassigned.length : this.transactionPool.transactions.unassigned.length);
+      }
+      // Schedule timeout-based block creation for low traffic scenarios
+      this._scheduleTimeoutBlockCreation(isCommittee);
+      return;
+    }
+    
+    logger.log(
+      P2P_PORT,
+      "THRESHOLD REACHED, TOTAL NOW:",
+      isCommittee ? this.transactionPool.committeeTransactions.unassigned.length : this.transactionPool.transactions.unassigned.length,
+    );
       // check the current node is the proposer
       let readyToPropose = true;
       const blocksPool = isCommittee ? this.blockPool.committeeBlocks : this.blockPool.blocks;
@@ -352,7 +348,7 @@ class P2pserver {
         );
       }
       const proposerObject = this.blockchain.getProposer(undefined, isCommittee);
-      console.log(
+      logger.log(
         P2P_PORT,
         "PROPOSE BLOCK CONDITION",
         "proposer index:", proposerObject.proposerIndex, NODES_SUBSET,
@@ -365,7 +361,7 @@ class P2pserver {
         readyToPropose &&
         this.transactionPool.getInflightBlocks(undefined, isCommittee).length <= 4
       ) {
-        console.log(P2P_PORT, "PROPOSING BLOCK");
+        logger.log(P2P_PORT, "PROPOSING BLOCK");
         // if the node is the proposer, create a block and broadcast it
         const previousBlock =
           this.transactionPool.getInflightBlocks(undefined, isCommittee).length > 1
@@ -377,7 +373,7 @@ class P2pserver {
           this.wallet,
           previousBlock,
         );
-        console.log(P2P_PORT, "CREATED BLOCK", JSON.stringify({
+        logger.log(P2P_PORT, "CREATED BLOCK", JSON.stringify({
           lastHash: block.lastHash,
           hash: block.hash,
           data: block.data,
@@ -395,7 +391,7 @@ class P2pserver {
         );
       }
     } else {
-      console.log(P2P_PORT, "Transaction Threshold NOT REACHED, TOTAL UNASSIGNED NOW:", isCommittee ? this.transactionPool.committeeTransactions.unassigned.length : this.transactionPool.transactions.unassigned.length);
+      logger.log(P2P_PORT, "Transaction Threshold NOT REACHED, TOTAL UNASSIGNED NOW:", isCommittee ? this.transactionPool.committeeTransactions.unassigned.length : this.transactionPool.transactions.unassigned.length);
     }
 
     // If lastTransactionCreatedAt is more than 1 minute ago, run after timeout, else run immediately  
@@ -406,7 +402,7 @@ class P2pserver {
       if (isCommittee) {
         if (
           this.lastCommitteeTransactionCreatedAt &&
-          now - this.lastCommitteeTransactionCreatedAt >= 8 * 1000 /* 8 seconds */ && 
+          now - this.lastCommitteeTransactionCreatedAt >= TIMEOUTS.TRANSACTION_INACTIVITY_THRESHOLD_MS && 
           this.transactionPool.committeeTransactions.unassigned.length > 0
         ) {
           this.initiateBlockCreation(P2P_PORT,false, true);
@@ -415,23 +411,29 @@ class P2pserver {
         // If no new transaction has triggered initiateBlockCreation in the last 60s, call it manually
         if (
           this.lastTransactionCreatedAt &&
-          now - this.lastTransactionCreatedAt >= 8 * 1000 /* 8 seconds */ && 
+          now - this.lastTransactionCreatedAt >= TIMEOUTS.TRANSACTION_INACTIVITY_THRESHOLD_MS && 
           this.transactionPool.transactions.unassigned.length > 0
         ) {
           this.initiateBlockCreation(P2P_PORT,false, false);
         }
       }
-    }, 1 * 10 * 1000); // 10 seconds
+    }, TIMEOUTS.BLOCK_CREATION_TIMEOUT_MS);
   }
 
-  // parse message
+  /**
+   * Parses incoming P2P messages and delegates to appropriate handlers
+   * @param {Object} data - Message data
+   * @param {boolean} isCore - Whether message is from core node
+   * @param {boolean} isCommittee - Committee flag
+   */
   async parseMessage(data, isCore, isCommittee = false) {
-    console.log(P2P_PORT, "RECEIVED", data.type, data.port);
+    logger.log(P2P_PORT, "RECEIVED", data.type, data.port);
 
     if (IS_FAULTY && ![MESSAGE_TYPE.transaction].includes(data.type)) {
       return;
     }
-    // select a particular message handler
+    
+    // Delegate to specific message handlers
     switch (data.type) {
       case MESSAGE_TYPE.transaction:
         // check if transactions is valid
@@ -447,7 +449,7 @@ class P2pserver {
             data.transaction,
             isCommittee
           );
-          console.log(
+          logger.log(
             P2P_PORT,
             "TRANSACTION ADDED, TOTAL NOW:",
             isCommittee ? this.transactionPool.committeeTransactions.unassigned.length : this.transactionPool.transactions.unassigned.length,
@@ -556,7 +558,7 @@ class P2pserver {
             );
             if (result !== false) {
               this.broadcastBlockToCore(result, isCommittee);
-              console.log(
+              logger.log(
                 P2P_PORT,
                 "NEW BLOCK ADDED TO BLOCK CHAIN, TOTAL NOW:",
                 isCommittee ? this.blockchain.committeeChain.length : this.blockchain.chain[SUBSET_INDEX].length,
@@ -570,7 +572,7 @@ class P2pserver {
               this.broadcastRoundChange(data.port, message, isCommittee);
 
             } else {
-              console.log(
+              logger.error(
                 P2P_PORT,
                 "NEW BLOCK FAILED TO ADD TO BLOCK CHAIN, TOTAL STILL:",
                 isCommittee ? this.blockchain.committeeChain.length : this.blockchain.chain[SUBSET_INDEX].length,
@@ -584,7 +586,7 @@ class P2pserver {
                 unassignedTransactions:
                   this.transactionPool.transactions.unassigned.length,
               };
-              console.log(
+              logger.log(
                 P2P_PORT,
                 `P2P STATS FOR #${SUBSET_INDEX}:`,
                 JSON.stringify(stats),
@@ -613,7 +615,7 @@ class P2pserver {
             (isCommittee ? this.messagePool.committeeList[data.message.blockHash] : this.messagePool.list[data.message.blockHash]).length >=
               MIN_APPROVALS
           ) {
-            console.log(
+            logger.log(
               P2P_PORT,
               "TRANSACTION POOL TO BE CLEARED, TOTAL NOW:",
               (isCommittee ? this.transactionPool.committeeTransactions[data.message.blockHash] : this.transactionPool.transactions[data.message.blockHash])?.length,
@@ -634,7 +636,7 @@ class P2pserver {
             this.blockchain.addBlock(data.block, data.subsetIndex);
             const rate = await this.blockchain.getRate(this.sockets.peers);
             const stats = { total: this.blockchain.getTotal(), rate };
-            console.log(
+            logger.log(
               P2P_PORT,
               `P2P STATS FOR #${SUBSET_INDEX}:`,
               JSON.stringify(stats),
@@ -653,7 +655,7 @@ class P2pserver {
                 transaction,
                 isCommittee
               );
-              console.log(
+              logger.log(
                 P2P_PORT,
                 "COMMITTEE TRANSACTION ADDED, TOTAL NOW:",
                 this.transactionPool.committeeTransactions.unassigned.length,
@@ -672,7 +674,7 @@ class P2pserver {
           data.config.forEach((item) => {
             config.set(item.key, item.value);
           });
-          console.log(
+          logger.log(
             P2P_PORT,
             `CONFIG UPDATE FOR #${SUBSET_INDEX}:`,
             JSON.stringify(data.config),

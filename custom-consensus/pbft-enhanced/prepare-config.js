@@ -26,52 +26,59 @@ const NUMBER_OF_FAULTY_NODES = Number(process.env.NUMBER_OF_FAULTY_NODES)
 const NUMBER_OF_NODES_PER_SHARD = Number(process.env.NUMBER_OF_NODES_PER_SHARD)
 const DEFAULT_TTL = Number(process.env.DEFAULT_TTL)
 const CPU_LIMIT = Number(process.env.CPU_LIMIT)
-const SHOULD_REDIRECT_FROM_FAULTY_NODES = Number(process.env.SHOULD_REDIRECT_FROM_FAULTY_NODES) === 1 ? 'true' : 'false'
+const SHOULD_REDIRECT_FROM_FAULTY_NODES =
+  Number(process.env.SHOULD_REDIRECT_FROM_FAULTY_NODES) === 1 ? 'true' : 'false'
 
 const coreServerPort = 4999
 
 const shuffleArray = (array) => {
-  const copy = array.slice(); // don't modify original
+  const copy = array.slice() // don't modify original
   for (let index = copy.length - 1; index > 0; index--) {
-    const index_ = Math.floor(Math.random() * (index + 1));
-    [copy[index], copy[index_]] = [copy[index_], copy[index]]; // swap
+    const index_ = Math.floor(Math.random() * (index + 1))
+    ;[copy[index], copy[index_]] = [copy[index_], copy[index]] // swap
   }
-  return copy;
+  return copy
 }
 
 const splitIntoShardsWithRemaining = (array) => {
-  const result = [];
-  let index = 0;
+  const result = []
+  let index = 0
 
   while (array.length - index >= NUMBER_OF_NODES_PER_SHARD) {
-    result.push(array.slice(index, index + NUMBER_OF_NODES_PER_SHARD));
-    index += NUMBER_OF_NODES_PER_SHARD;
+    result.push(array.slice(index, index + NUMBER_OF_NODES_PER_SHARD))
+    index += NUMBER_OF_NODES_PER_SHARD
   }
 
   // Last group with remaining nodes
-  result[result.length - 1] = [...result[result.length - 1], ...array.slice(index)];
+  result[result.length - 1] = [
+    ...result[result.length - 1],
+    ...array.slice(index)
+  ]
 
-  return result;
+  return result
 }
 
 const getRandomIndicesArrays = (array) => {
-  const indices = Array.from({ length: array.length }, (_, index) => index);
-  const shuffledArray = shuffleArray(indices);
-  const faultyNodes = shuffleArray(shuffledArray).slice(0, NUMBER_OF_FAULTY_NODES);
+  const indices = Array.from({ length: array.length }, (_, index) => index)
+  const shuffledArray = shuffleArray(indices)
+  const faultyNodes = shuffleArray(shuffledArray).slice(
+    0,
+    NUMBER_OF_FAULTY_NODES
+  )
   return {
     shards: splitIntoShardsWithRemaining(shuffledArray),
-    faultyNodes,
-  };
+    faultyNodes
+  }
 }
 
 const { shards: nodesSubsets, faultyNodes } = getRandomIndicesArrays(
   Array.from({ length: NUMBER_OF_NODES }, (_, index) => index)
 )
 console.log(nodesSubsets, faultyNodes)
-let environmentArray = [];
+let environmentArray = []
 // Save environmentVariables to a yml file
-const environmentFile = 'nodesEnv.yml';
-const kubeFile = 'kubeConfig.yml';
+const environmentFile = 'nodesEnv.yml'
+const kubeFile = 'kubeConfig.yml'
 nodesSubsets.forEach((nodesSubset, subsetIndex) => {
   console.log(
     'Subset PBFT nodes:',
@@ -102,7 +109,8 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
       )
       let peersSubset = []
       nodesSubset.forEach((index) => {
-        if (index in peers) {
+        // Check if index is within bounds of peers array
+        if (index < peers.length && peers[index]) {
           peersSubset.push(peers[index])
         }
       })
@@ -122,72 +130,90 @@ environmentArray.sort((a, b) => a.HTTP_PORT - b.HTTP_PORT)
 
 fs.writeFileSync(environmentFile, yaml.dump(environmentArray))
 
-const memory = '64Mi';
-const cpu = `${Number(CPU_LIMIT) * 1000}m`;
+const memory = '64Mi'
+const cpu = `${Number(CPU_LIMIT) * 1000}m`
 const k8sConfig = {
   apiVersion: 'v1',
   kind: 'List',
   items: [
-    ...environmentArray.flatMap((environmentVariables, index) => ([{
-      apiVersion: 'v1',
-      kind: 'Pod',
-      metadata: {
-        name: `p2p-server-${index}`,
-        labels: { app: 'p2p-server', domain: 'blockchain' }
-      },
-      spec: {
-        containers: [
-          {
-            name: 'p2p-server',
-            image: 'lebaz20/blockchain-p2p-server:latest',
-            imagePullPolicy: 'IfNotPresent',
-            resources: {
-              limits: {
-                memory,
-                cpu
-              }
-            },
-            env: Object.entries(environmentVariables).map(([key, value]) => ({
-              name: key,
-              value: String(value)
-            })),
-            ports: [
-              { containerPort: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001 },
-              { containerPort: environmentVariables.P2P_PORT ? Number(environmentVariables.P2P_PORT) : 5001 }
-            ]
-          }
-        ],
-        restartPolicy: 'Never'
-      }
-    },
-  {
-      apiVersion: 'v1',
-      kind: 'Service',
-      metadata: {
-        name: `p2p-server-${index}`,
-        labels: { app: 'p2p-server', domain: 'blockchain' }
-      },
-      spec: {
-        clusterIP: 'None',
-        selector: {
-          app: 'p2p-server'
+    ...environmentArray.flatMap((environmentVariables, index) => [
+      {
+        apiVersion: 'v1',
+        kind: 'Pod',
+        metadata: {
+          name: `p2p-server-${index}`,
+          labels: { app: 'p2p-server', domain: 'blockchain' }
         },
-        ports: [
-          {
-            name: environmentVariables.P2P_PORT.toString(),
-            protocol: 'TCP',
-            port: environmentVariables.P2P_PORT ? Number(environmentVariables.P2P_PORT) : 5001,
-            targetPort: environmentVariables.P2P_PORT ? Number(environmentVariables.P2P_PORT) : 5001
+        spec: {
+          containers: [
+            {
+              name: 'p2p-server',
+              image: 'lebaz20/blockchain-p2p-server:latest',
+              imagePullPolicy: 'IfNotPresent',
+              resources: {
+                limits: {
+                  memory,
+                  cpu
+                }
+              },
+              env: Object.entries(environmentVariables).map(([key, value]) => ({
+                name: key,
+                value: String(value)
+              })),
+              ports: [
+                {
+                  containerPort: environmentVariables.HTTP_PORT
+                    ? Number(environmentVariables.HTTP_PORT)
+                    : 3001
+                },
+                {
+                  containerPort: environmentVariables.P2P_PORT
+                    ? Number(environmentVariables.P2P_PORT)
+                    : 5001
+                }
+              ]
+            }
+          ],
+          restartPolicy: 'Never'
+        }
+      },
+      {
+        apiVersion: 'v1',
+        kind: 'Service',
+        metadata: {
+          name: `p2p-server-${index}`,
+          labels: { app: 'p2p-server', domain: 'blockchain' }
+        },
+        spec: {
+          clusterIP: 'None',
+          selector: {
+            app: 'p2p-server'
           },
-          {
-            name: environmentVariables.HTTP_PORT.toString(),
-            protocol: 'TCP',
-            port: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001,
-            targetPort: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001,
-          }
-        ]
+          ports: [
+            {
+              name: environmentVariables.P2P_PORT.toString(),
+              protocol: 'TCP',
+              port: environmentVariables.P2P_PORT
+                ? Number(environmentVariables.P2P_PORT)
+                : 5001,
+              targetPort: environmentVariables.P2P_PORT
+                ? Number(environmentVariables.P2P_PORT)
+                : 5001
+            },
+            {
+              name: environmentVariables.HTTP_PORT.toString(),
+              protocol: 'TCP',
+              port: environmentVariables.HTTP_PORT
+                ? Number(environmentVariables.HTTP_PORT)
+                : 3001,
+              targetPort: environmentVariables.HTTP_PORT
+                ? Number(environmentVariables.HTTP_PORT)
+                : 3001
+            }
+          ]
+        }
       }
-    }])),
+    ]),
     {
       apiVersion: 'v1',
       kind: 'Pod',
@@ -207,13 +233,13 @@ const k8sConfig = {
                 cpu
               }
             },
-            env: [{
-              name: 'SHOULD_REDIRECT_FROM_FAULTY_NODES',
-              value: String(SHOULD_REDIRECT_FROM_FAULTY_NODES)
-            }],
-            ports: [
-              { containerPort: coreServerPort },
-            ]
+            env: [
+              {
+                name: 'SHOULD_REDIRECT_FROM_FAULTY_NODES',
+                value: String(SHOULD_REDIRECT_FROM_FAULTY_NODES)
+              }
+            ],
+            ports: [{ containerPort: coreServerPort }]
           }
         ],
         restartPolicy: 'Never'
@@ -240,20 +266,20 @@ const k8sConfig = {
           }
         ]
       }
-    },
+    }
   ]
-};
-fs.writeFileSync(kubeFile, yaml.dump(k8sConfig));
+}
+fs.writeFileSync(kubeFile, yaml.dump(k8sConfig))
 
-const ports = environmentArray.map(environment => environment.HTTP_PORT);
-const weights = ports.map(() => Math.floor(Math.random() * 10) + 1); // random weight 1-10
+const ports = environmentArray.map((environment) => environment.HTTP_PORT)
+const weights = ports.map(() => Math.floor(Math.random() * 10) + 1) // random weight 1-10
 
-let weightedPorts = [];
+let weightedPorts = []
 ports.forEach((endpoint, index) => {
   for (let w = 0; w < weights[index]; w++) {
-    weightedPorts.push(endpoint);
+    weightedPorts.push(endpoint)
   }
-});
+})
 
 // Write weighted ports to CSV for JMeter
-fs.writeFileSync('jmeter_ports.csv', weightedPorts.join('\n'));
+fs.writeFileSync('jmeter_ports.csv', weightedPorts.join('\n'))
