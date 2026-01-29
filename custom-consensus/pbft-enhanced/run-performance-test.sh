@@ -5,12 +5,21 @@
 
 set -e
 
+# Get script directory
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR"
+
 # Color codes for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# Logging function
+log() {
+    echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a server.log
+}
 
 # Configuration (use defaults from start.sh if not set)
 export NUMBER_OF_NODES=${NUMBER_OF_NODES:-4}
@@ -33,38 +42,41 @@ RESULTS_FILE="${RESULTS_DIR}/pbft-enhanced-${TIMESTAMP}.jtl"
 SUMMARY_FILE="${RESULTS_DIR}/pbft-enhanced-${TIMESTAMP}-summary.txt"
 STATS_FILE="${RESULTS_DIR}/pbft-enhanced-${TIMESTAMP}-stats.csv"
 
-echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}PBFT-Enhanced Performance Test${NC}"
-echo -e "${BLUE}========================================${NC}"
-echo -e "Nodes: ${NUMBER_OF_NODES}"
-echo -e "Transaction Threshold: ${TRANSACTION_THRESHOLD}"
-echo -e "JMeter Threads: ${JMETER_THREADS}"
-echo -e "Test Duration: ${JMETER_DURATION}s"
-echo -e "${BLUE}========================================${NC}\n"
+log "${BLUE}========================================${NC}"
+log "${BLUE}PBFT-Enhanced Performance Test${NC}"
+log "${BLUE}========================================${NC}"
+log "Nodes: ${NUMBER_OF_NODES}"
+log "Transaction Threshold: ${TRANSACTION_THRESHOLD}"
+log "JMeter Threads: ${JMETER_THREADS}"
+log "Test Duration: ${JMETER_DURATION}s"
+log "${BLUE}========================================${NC}"
+echo
 
 # Create results directory
 mkdir -p "${RESULTS_DIR}"
 
 # Cleanup function
 cleanup() {
-    echo -e "\n${YELLOW}Cleaning up...${NC}"
+    log "\n${YELLOW}Cleaning up...${NC}"
     
     # Stop port forwarding
-    pkill -f "kubectl port-forward" || true
+    log "Stopping port forwarding..."
+    pkill -f "kubectl port-forward" 2>&1 | tee -a server.log || true
     
     # Delete Kubernetes resources
-    kubectl delete -f kubeConfig.yml --ignore-not-found || true
+    log "Deleting Kubernetes resources..."
+    kubectl delete -f kubeConfig.yml --ignore-not-found 2>&1 | tee -a server.log || true
     
-    echo -e "${GREEN}Cleanup complete${NC}"
+    log "${GREEN}Cleanup complete${NC}"
 }
 
 # Set trap to cleanup on exit
 trap cleanup EXIT INT TERM
 
 # Step 1: Start blockchain using existing start.sh
-echo -e "${BLUE}Step 1: Starting blockchain (using start.sh)...${NC}"
+log "${BLUE}Step 1: Starting blockchain (using start.sh)...${NC}"
 # Run start.sh in background and wait for port forwarding to be ready
-./start.sh > /tmp/start-enhanced.log 2>&1 &
+./start.sh 2>&1 | tee -a server.log &
 START_PID=$!
 
 # Wait for port forwarding to actually work (not just be started)
@@ -77,7 +89,7 @@ while true; do
     fi
     
     if [ $ELAPSED -ge $TIMEOUT ]; then
-        echo -e "${RED}✗ Timeout waiting for port forwarding${NC}"
+        log "${RED}✗ Timeout waiting for port forwarding${NC}"
         kill $START_PID 2>/dev/null || true
         exit 1
     fi
@@ -90,11 +102,12 @@ done
 # Kill start.sh to prevent log streaming (but keep port forwarding alive)
 kill $START_PID 2>/dev/null || true
 
-echo -e "${GREEN}✓ Blockchain deployed and ready${NC}\n"
+log "${GREEN}✓ Blockchain deployed and ready${NC}"
+echo
 
 # Step 2: Wait for blockchain to stabilize
-echo -e "${BLUE}Step 2: Waiting for all nodes to be ready...${NC}"
-TIMEOUT=60
+log "${BLUE}Step 2: Waiting for all nodes to be ready...${NC}"
+TIMEOUT=90
 ELAPSED=0
 READY_COUNT=0
 
@@ -112,8 +125,8 @@ while [ $READY_COUNT -lt $NUMBER_OF_NODES ]; do
     fi
     
     if [ $ELAPSED -ge $TIMEOUT ]; then
-        echo -e "${RED}✗ Timeout waiting for nodes to be ready${NC}"
-        echo -e "${YELLOW}Only $READY_COUNT/$NUMBER_OF_NODES nodes are responding${NC}"
+        log "${RED}✗ Timeout waiting for nodes to be ready${NC}"
+        log "${YELLOW}Only $READY_COUNT/$NUMBER_OF_NODES nodes are responding${NC}"
         exit 1
     fi
     
@@ -122,13 +135,15 @@ while [ $READY_COUNT -lt $NUMBER_OF_NODES ]; do
     echo -ne "  Ready: $READY_COUNT/$NUMBER_OF_NODES nodes... ${ELAPSED}s\r"
 done
 
-echo -e "${GREEN}✓ All $NUMBER_OF_NODES nodes are ready${NC}\n"
+log "${GREEN}✓ All $NUMBER_OF_NODES nodes are ready${NC}"
+echo
 
 # Step 3: Run JMeter test
-echo -e "${BLUE}Step 3: Running JMeter performance test...${NC}"
-echo -e "  Duration: ${JMETER_DURATION}s"
-echo -e "  Threads: ${JMETER_THREADS}"
-echo -e "  Ramp-up: ${JMETER_RAMP_UP}s\n"
+log "${BLUE}Step 3: Running JMeter performance test...${NC}"
+log "  Duration: ${JMETER_DURATION}s"
+log "  Threads: ${JMETER_THREADS}"
+log "  Ramp-up: ${JMETER_RAMP_UP}s"
+echo
 
 jmeter -n -t "Test Plan.jmx" \
     -Jthreads=${JMETER_THREADS} \
@@ -136,12 +151,13 @@ jmeter -n -t "Test Plan.jmx" \
     -Jduration=${JMETER_DURATION} \
     -Jthroughput=${JMETER_THROUGHPUT} \
     -l "${RESULTS_FILE}" \
-    -e -o "${RESULTS_DIR}/pbft-enhanced-${TIMESTAMP}-report"
+    -e -o "${RESULTS_DIR}/pbft-enhanced-${TIMESTAMP}-report" 2>&1 | tee -a server.log
 
-echo -e "${GREEN}✓ JMeter test completed${NC}\n"
+log "${GREEN}✓ JMeter test completed${NC}"
+echo
 
 # Step 4: Collect blockchain statistics
-echo -e "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
+log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
 {
     echo "PBFT-Enhanced Performance Test Results"
     echo "========================================"
@@ -216,12 +232,13 @@ echo -e "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
     echo "  - Consensus not reached for pending blocks"
     echo "  - Block creation in progress"
     echo "  - Test duration ended before block finalization"
-} > "${SUMMARY_FILE}"
+} | tee "${SUMMARY_FILE}" | tee -a server.log > /dev/null
 
-echo -e "${GREEN}✓ Statistics collected${NC}\n"
+log "${GREEN}✓ Statistics collected${NC}"
+echo
 
 # Step 5: Parse JMeter results
-echo -e "${BLUE}Step 5: Parsing JMeter results...${NC}"
+log "${BLUE}Step 5: Parsing JMeter results...${NC}"
 if [ -f "${RESULTS_FILE}" ]; then
     {
         echo "Metric,Value"
@@ -270,23 +287,24 @@ if [ -f "${RESULTS_FILE}" ]; then
         fi
     } > "${STATS_FILE}"
     
-    echo -e "${GREEN}✓ Results parsed${NC}\n"
+    log "${GREEN}✓ Results parsed${NC}"
+    echo
 fi
 
 # Display summary
-echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}Performance Test Complete!${NC}"
-echo -e "${BLUE}========================================${NC}"
-echo -e "Results saved to:"
-echo -e "  - Summary: ${SUMMARY_FILE}"
-echo -e "  - Stats: ${STATS_FILE}"
-echo -e "  - Raw data: ${RESULTS_FILE}"
-echo -e "  - HTML Report: ${RESULTS_DIR}/pbft-enhanced-${TIMESTAMP}-report/index.html"
-echo -e ""
+log "${BLUE}========================================${NC}"
+log "${BLUE}Performance Test Complete!${NC}"
+log "${BLUE}========================================${NC}"
+log "Results saved to:"
+log "  - Summary: ${SUMMARY_FILE}"
+log "  - Stats: ${STATS_FILE}"
+log "  - Raw data: ${RESULTS_FILE}"
+log "  - HTML Report: ${RESULTS_DIR}/pbft-enhanced-${TIMESTAMP}-report/index.html"
+echo
 
 if [ -f "${STATS_FILE}" ]; then
-    echo -e "${GREEN}Quick Stats:${NC}"
-    cat "${STATS_FILE}"
+    log "${GREEN}Quick Stats:${NC}"
+    cat "${STATS_FILE}" | tee -a server.log
 fi
 
-echo -e "\n${BLUE}========================================${NC}"
+log "${BLUE}========================================${NC}"

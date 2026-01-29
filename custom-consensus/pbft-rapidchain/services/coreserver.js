@@ -243,7 +243,7 @@ class Coreserver {
               blocks: data.rate.blocks?.[data.rate.shardIndex],
               shardStatus: data.rate.shardStatus
             }
-            const { SHOULD_REDIRECT_FROM_FAULTY_NODES } = this.config.get()
+            const { SHOULD_REDIRECT_FROM_FAULTY_NODES } = this.config
             if (SHOULD_REDIRECT_FROM_FAULTY_NODES) {
               this.handleFaultyShardRedirection()
             }

@@ -134,6 +134,12 @@ class IDAGossip {
 
   sendSocketMessage(socket, data) {
     return new Promise((resolve, reject) => {
+      // Check if socket is open before sending
+      if (!socket || socket.readyState !== 1) {
+        // WebSocket.OPEN = 1
+        reject(new Error('WebSocket is not open'))
+        return
+      }
       socket.send(data, (error) => {
         if (error) reject(error)
         else resolve()

@@ -55,12 +55,16 @@ sleep 2
 
 # Step 3: Deploy to Kubernetes
 echo -e "${BLUE}Step 3: Deploying to Kubernetes...${NC}"
-kubectl delete -f kubeConfig.yml --ignore-not-found
-kubectl apply -f kubeConfig.yml
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Deleting existing Kubernetes resources..." | tee -a server.log
+kubectl delete -f kubeConfig.yml --ignore-not-found 2>&1 | tee -a server.log
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Applying Kubernetes configuration..." | tee -a server.log
+kubectl apply -f kubeConfig.yml 2>&1 | tee -a server.log
 echo -e "${GREEN}✓ Deployed to Kubernetes${NC}\n"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Kubernetes deployment complete" | tee -a server.log
 
 # Step 4: Wait for the pods to be ready
 echo -e "${BLUE}Step 4: Waiting for pods to be ready...${NC}"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waiting for all pods to be in Running state..." | tee -a server.log
 TIMEOUT=120
 ELAPSED=0
 while true; do
@@ -70,13 +74,16 @@ while true; do
     fi
     if [ $ELAPSED -ge $TIMEOUT ]; then
         echo -e "${RED}✗ Timeout waiting for pods to start${NC}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Timeout waiting for pods" | tee -a server.log
         exit 1
     fi
     sleep 2
     ELAPSED=$((ELAPSED + 2))
     echo -ne "  Waiting... ${ELAPSED}s\r"
 done
+kubectl get pods -l domain=blockchain 2>&1 | tee -a server.log
 echo -e "${GREEN}✓ All pods are running${NC}\n"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] All pods ready" | tee -a server.log
 
 # Step 5: Set up port forwarding
 echo -e "${BLUE}Step 5: Setting up port forwarding...${NC}"
@@ -89,5 +96,6 @@ echo -e "${BLUE}========================================${NC}"
 echo -e "${GREEN}Blockchain is running!${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo -e "Streaming logs... (Press Ctrl+C to stop)\n"
+echo -e "Logs are also being written to: server.log\n"
 
-kubectl logs -l domain=blockchain -f --max-log-requests=10000
+kubectl logs -l domain=blockchain -f --max-log-requests=10000 2>&1 | tee -a server.log
