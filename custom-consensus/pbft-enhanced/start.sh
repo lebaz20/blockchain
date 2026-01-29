@@ -87,6 +87,10 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] All pods ready" | tee -a server.log
 
 # Step 5: Set up port forwarding
 echo -e "${BLUE}Step 5: Setting up port forwarding...${NC}"
+# Kill any existing port forwarding processes to avoid conflicts
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Cleaning up any existing port forwarding..." | tee -a server.log
+pkill -f "kubectl port-forward" 2>/dev/null || true
+sleep 2
 for ((i=0; i<NUMBER_OF_NODES; i++)); do
   kubectl port-forward pod/p2p-server-$i $((3001+i)):$((3001+i)) > /dev/null 2>&1 &
 done

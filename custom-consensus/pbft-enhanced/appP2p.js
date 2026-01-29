@@ -124,7 +124,11 @@ app.post('/transaction', async (request, response) => {
       logger.log(`Processing transaction on ${HTTP_PORT}`, JSON.stringify(item))
       const transaction = wallet.createTransaction(item)
       p2pserver.broadcastTransaction(P2P_PORT, transaction)
-      p2pserver.parseMessage({ type: MESSAGE_TYPE.transaction, transaction })
+      p2pserver.parseMessage({
+        type: MESSAGE_TYPE.transaction,
+        transaction,
+        port: P2P_PORT
+      })
 
       /**
        * Simulate block verification by random shards
@@ -134,7 +138,8 @@ app.post('/transaction', async (request, response) => {
       p2pserver.broadcastTransaction(P2P_PORT, duplicateTransaction)
       p2pserver.parseMessage({
         type: MESSAGE_TYPE.transaction,
-        transaction: duplicateTransaction
+        transaction: duplicateTransaction,
+        port: P2P_PORT
       })
     })
     response.redirect('/stats')
