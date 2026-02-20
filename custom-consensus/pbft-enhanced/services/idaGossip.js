@@ -30,21 +30,16 @@ class IDAGossip {
     Object.keys(this.socketGossipNodes)
       .filter((socketSubsetIndex) => socketSubsetIndex !== subsetIndex)
       .forEach((socketSubsetIndex) => {
-        Object.keys(this.socketGossipNodes[socketSubsetIndex]).forEach(
-          (socketPort) => {
-            const socket =
-              this.socketGossipNodes[socketSubsetIndex][socketPort].socket
-            sockets.push(socket)
-          }
-        )
+        Object.keys(this.socketGossipNodes[socketSubsetIndex]).forEach((socketPort) => {
+          const socket = this.socketGossipNodes[socketSubsetIndex][socketPort].socket
+          sockets.push(socket)
+        })
       })
     return sockets
   }
 
   getSubset(subsetIndex) {
-    return Object.values(this.socketGossipNodes[subsetIndex]).map(
-      ({ socket }) => socket
-    )
+    return Object.values(this.socketGossipNodes[subsetIndex]).map(({ socket }) => socket)
   }
 
   getSocketGossipPeers(sendersSubset, socketsKey) {
@@ -54,7 +49,15 @@ class IDAGossip {
     const allPorts = Object.keys(sockets)
     const filteredPorts = allPorts.filter((port) => !sendersSubset.includes(port))
     const logger = require('../utils/logger')
-    logger.log('IDA GOSSIP PEER SELECTION:', 'all:', allPorts, 'exclude:', sendersSubset, 'selected:', filteredPorts)
+    logger.log(
+      'IDA GOSSIP PEER SELECTION:',
+      'all:',
+      allPorts,
+      'exclude:',
+      sendersSubset,
+      'selected:',
+      filteredPorts
+    )
     return filteredPorts.map((port) => sockets[port].socket)
   }
 
@@ -67,9 +70,7 @@ class IDAGossip {
   getHTTPGossipPeers(sendersSubset) {
     return Array.from({ length: NUMBER_OF_NODES }, (_, index) => index)
       .filter((number_) => !sendersSubset.includes(number_))
-      .map(
-        (number_) => `http://p2p-server-${number_}:${3001 + number_}/message`
-      )
+      .map((number_) => `http://p2p-server-${number_}:${3001 + number_}/message`)
   }
 
   // Split data into IDA chunks
@@ -153,13 +154,7 @@ class IDAGossip {
   gossipChunk(message, ttl = DEFAULT_TTL) {
     if (ttl <= 0) return
 
-    const {
-      communicationType,
-      sendersSubset,
-      targetsSubset,
-      shouldGossip,
-      socketsKey
-    } = message
+    const { communicationType, sendersSubset, targetsSubset, shouldGossip, socketsKey } = message
     let peers
     if (communicationType === 'http') {
       peers = targetsSubset ?? this.getHTTPGossipPeers(sendersSubset)
@@ -167,13 +162,10 @@ class IDAGossip {
       if (targetsSubset === 'core') {
         peers = [this.getSocketGossipCore(socketsKey)]
       } else {
-        peers =
-          targetsSubset ?? this.getSocketGossipPeers(sendersSubset, socketsKey)
+        peers = targetsSubset ?? this.getSocketGossipPeers(sendersSubset, socketsKey)
       }
     }
-    const randomPeers = shouldGossip
-      ? peers.sort(() => 0.5 - Math.random()).slice(0, 4)
-      : peers
+    const randomPeers = shouldGossip ? peers.sort(() => 0.5 - Math.random()).slice(0, 4) : peers
 
     const requests = randomPeers.map((peer) => {
       const messageToSend = {
@@ -335,9 +327,7 @@ class IDAGossip {
     if (chunks.length >= totalChunks) {
       // Take only the required chunks for reconstruction
       const requiredChunks = chunks.slice(0, totalChunks)
-      const reconstructedBuffer = Buffer.concat(
-        requiredChunks.map((chunk) => chunk.data)
-      )
+      const reconstructedBuffer = Buffer.concat(requiredChunks.map((chunk) => chunk.data))
 
       // Verify file integrity
       const reconstructedHash = crypto.SHA256(reconstructedBuffer).toString()
