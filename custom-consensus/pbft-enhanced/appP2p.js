@@ -123,24 +123,25 @@ app.post('/transaction', async (request, response) => {
     data.forEach((item) => {
       logger.log(`Processing transaction on ${HTTP_PORT}`, JSON.stringify(item))
       const transaction = wallet.createTransaction(item)
-      p2pserver.broadcastTransaction(P2P_PORT, transaction)
+      // Process locally FIRST before broadcasting
       p2pserver.parseMessage({
         type: MESSAGE_TYPE.transaction,
         transaction,
         port: P2P_PORT
       })
+      p2pserver.broadcastTransaction(P2P_PORT, transaction)
 
       /**
        * Simulate block verification by random shards
        * We need then to mark faulty shards and exclude them from the network activities
        */
       const duplicateTransaction = wallet.createTransaction(item)
-      p2pserver.broadcastTransaction(P2P_PORT, duplicateTransaction)
       p2pserver.parseMessage({
         type: MESSAGE_TYPE.transaction,
         transaction: duplicateTransaction,
         port: P2P_PORT
       })
+      p2pserver.broadcastTransaction(P2P_PORT, duplicateTransaction)
     })
     response.redirect('/stats')
   }

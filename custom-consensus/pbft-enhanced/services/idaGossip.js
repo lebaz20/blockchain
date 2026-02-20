@@ -51,9 +51,11 @@ class IDAGossip {
     const sockets = socketsKey
       ? (this.socketGossipPeers[socketsKey] ?? this.socketGossipPeers)
       : this.socketGossipPeers
-    return Object.keys(sockets)
-      .filter((port) => !sendersSubset.includes(port))
-      .map((port) => sockets[port].socket)
+    const allPorts = Object.keys(sockets)
+    const filteredPorts = allPorts.filter((port) => !sendersSubset.includes(port))
+    const logger = require('../utils/logger')
+    logger.log('IDA GOSSIP PEER SELECTION:', 'all:', allPorts, 'exclude:', sendersSubset, 'selected:', filteredPorts)
+    return filteredPorts.map((port) => sockets[port].socket)
   }
 
   getSocketGossipCore(socketsKey) {

@@ -100,7 +100,7 @@ class P2pserver {
     return new Promise((resolve) => {
       function checkWebServer() {
         axios
-          .get(`${url  }/health`)
+          .get(`${url}/health`)
           .then(() => {
             logger.log(`WebServer is open: ${url}`)
             resolve(true)
@@ -262,6 +262,14 @@ class P2pserver {
   }
 
   _handleTransaction(data) {
+    logger.log(
+        P2P_PORT,
+        'TRANSACTION RECEIVED, TOTAL NOW:',
+        JSON.stringify(data),
+        this.transactionPool.transactionExists(data.transaction),
+        this.transactionPool.verifyTransaction(data.transaction),
+        this.validators.isValidValidator(data.transaction.from)
+      )
     if (
       !this.transactionPool.transactionExists(data.transaction) &&
       this.transactionPool.verifyTransaction(data.transaction) &&
@@ -456,6 +464,72 @@ class P2pserver {
           TIMEOUTS.TRANSACTION_INACTIVITY_THRESHOLD_MS
       const hasTransactions =
         this.transactionPool.transactions.unassigned.length > 0
+      const transactionCount =
+        this.transactionPool.transactions.unassigned.length
+      const proposerObject = this.blockchain.getProposer()
+      const isProposer = proposerObject.proposer === this.wallet.getPublicKey()
+
+      // ============================================================================
+      // TRANSACTION REDISTRIBUTION MECHANISM (TIMEOUT-BASED WORKAROUND)
+      // ============================================================================
+      // PROBLEM: In PBFT, only the designated proposer can create blocks. However,
+      // load balancers distribute client requests across all nodes. If the proposer
+      // doesn't receive enough transactions directly, no blocks are created despite
+      // high overall transaction volume across other nodes.
+      //
+      // SOLUTION: Non-proposer nodes with >= 50 transactions periodically re-broadcast
+      // them to the network every 10 seconds, increasing the chance the proposer receives them.
+      //
+      // WHY THIS CAUSES ISSUES - CRITICAL TRADE-OFFS:
+      // ============================================================================
+      // 1. NETWORK OVERHEAD
+      //    - Same transactions broadcast multiple times by different nodes
+      //    - Bandwidth waste proportional to: (number of non-proposer nodes) * (tx count)
+      //    - In 4-node network: 3 nodes might re-broadcast 50 txs each = 150 duplicate messages
+      //
+      // 2. CPU OVERHEAD
+      //    - Each node must re-process duplicate transactions
+      //    - Though filtered by transactionExists() check, still CPU cycles wasted
+      //    - Can impact overall throughput under high load
+      //
+      // 3. BREAKS PURE DECENTRALIZATION
+      //    - Creates implicit dependency on proposer role availability
+      //    - If proposer is down/slow, entire network stalls
+      //    - Original PBFT design assumes all nodes receive all transactions
+      //
+      // 4. TIMING ISSUES & RACE CONDITIONS
+      //    - Proposer rotation happens every minute based on block hash
+      //    - Might rotate proposer before redistributed txs reach old proposer
+      //    - Multiple non-proposers might redistribute simultaneously → message storms
+      //
+      // 5. DOES NOT SCALE
+      //    - With more nodes, more duplicates broadcast
+      //    - Network bandwidth grows O(n²) instead of O(n)
+      //    - Better solutions needed for production: consistent hashing, mempool sync, etc.
+      //
+      // BETTER ALTERNATIVES (NOT IMPLEMENTED HERE):
+      // ============================================================================
+      // A) CONSISTENT HASHING: Route client requests to proposer based on hash
+      // B) MEMPOOL SYNC: Explicit transaction pool synchronization protocol
+      // C) MULTIPLE PROPOSERS: Allow concurrent block proposals (requires consensus changes)
+      // D) GOSSIP PROTOCOL: Structured propagation ensuring all nodes receive all txs
+      //
+      // This timeout-based approach is a WORKAROUND for load balancing issues, not
+      // a proper architectural solution. It sacrifices efficiency for availability.
+      // ============================================================================
+      if (!isProposer && transactionCount >= TRANSACTION_THRESHOLD / 2) {
+        logger.log(
+          P2P_PORT,
+          'NON-PROPOSER WITH MANY TXs - Redistributing to network:',
+          transactionCount
+        )
+        // Re-broadcast accumulated transactions to ensure proposer receives them
+        const txToRedistribute =
+          this.transactionPool.transactions.unassigned.slice(0, 50)
+        txToRedistribute.forEach((tx) => {
+          this.broadcastTransaction(P2P_PORT, tx)
+        })
+      }
 
       if (isInactive && hasTransactions) {
         this.initiateBlockCreation(P2P_PORT, false)
