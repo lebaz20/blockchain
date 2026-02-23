@@ -7,7 +7,7 @@ import pluginPromise from 'eslint-plugin-promise'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['*.config.mjs']),
+  globalIgnores(['*.config.mjs', 'performance-results/**']),
   {
     files: ['**/*.{js,mjs,cjs}'],
     languageOptions: {
@@ -31,10 +31,7 @@ export default defineConfig([
       // Clean Code: Function Complexity (adapted for blockchain consensus)
       complexity: ['warn', 20],
       'max-depth': ['warn', 4],
-      'max-lines-per-function': [
-        'warn',
-        { max: 100, skipComments: true, skipBlankLines: true }
-      ],
+      'max-lines-per-function': ['warn', { max: 100, skipComments: true, skipBlankLines: true }],
       'max-params': ['error', 4],
       'max-statements': ['warn', 30],
 
@@ -75,7 +72,7 @@ export default defineConfig([
       'sonarjs/no-small-switch': 'off',
       'sonarjs/pseudo-random': 'off',
       'sonarjs/no-os-command-from-path': 'off',
-      'sonarjs/cognitive-complexity': ['warn', 25],
+      'sonarjs/cognitive-complexity': ['warn', 20],
       'sonarjs/no-duplicate-string': ['warn', { threshold: 10 }],
       'sonarjs/no-identical-functions': 'warn',
 

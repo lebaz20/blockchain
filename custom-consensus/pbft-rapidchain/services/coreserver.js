@@ -148,9 +148,7 @@ class Coreserver {
       ([faultyShardIndex, { redirectSubset }]) => {
         let redirectUrls = []
         if (this.sockets[redirectSubset]) {
-          redirectUrls = Object.values(this.sockets[redirectSubset]).map(
-            (object) => object.url
-          )
+          redirectUrls = Object.values(this.sockets[redirectSubset]).map((object) => object.url)
           const config = [{ key: 'REDIRECT_TO_URL', value: redirectUrls }]
           this.updateConfig(config, faultyShardIndex)
         }
@@ -170,13 +168,14 @@ class Coreserver {
   handleFaultyShardRedirection() {
     const shardStatusMap = this.calculateShardStatusMap()
     const faultyShards = shardStatusMap[SHARD_STATUS.faulty] || []
-    const underUtilizedShards =
-      shardStatusMap[SHARD_STATUS.under_utilized] || []
+    const underUtilizedShards = shardStatusMap[SHARD_STATUS.under_utilized] || []
     const normalShards = shardStatusMap[SHARD_STATUS.normal] || []
     const overUtilizedShards = shardStatusMap[SHARD_STATUS.over_utilized] || []
 
-    const faultyShardRedirectAssignment =
-      this.buildFaultyShardRedirectAssignment(faultyShards, shardStatusMap)
+    const faultyShardRedirectAssignment = this.buildFaultyShardRedirectAssignment(
+      faultyShards,
+      shardStatusMap
+    )
 
     this.applyRedirectConfiguration(faultyShardRedirectAssignment)
     this.clearRedirectConfiguration([
@@ -195,62 +194,55 @@ class Coreserver {
       }
       const receivedData = JSON.parse(message)
       const data = this.idaGossip.handleChunk(receivedData)
-      logger.log(this.port, 'RECEIVED', data.type)
+      if (data) {
+        logger.log(this.port, 'RECEIVED', data.type)
 
-      // select a particular message handler
-      switch (data.type) {
-        case MESSAGE_TYPE.block_to_core:
-          // add updated block to chain
-          if (
-            !this.blockchain.existingBlock(
-              data.block.hash,
-              data.subsetIndex,
-              isCommittee
-            )
-          ) {
-            this.blockchain.addBlock(data.block, data.subsetIndex, !isCommittee)
+        // select a particular message handler
+        switch (data.type) {
+          case MESSAGE_TYPE.block_to_core:
+            // add updated block to chain
+            if (!this.blockchain.existingBlock(data.block.hash, data.subsetIndex, isCommittee)) {
+              this.blockchain.addBlock(data.block, data.subsetIndex, !isCommittee)
 
-            if (!isCommittee) {
-              this.sendBlockToCommitteeShard(data.block, data.subsetIndex)
-            } else {
-              const stats = {
-                total: this.blockchain.getTotal(),
-                rate: this.rates
+              if (!isCommittee) {
+                this.sendBlockToCommitteeShard(data.block, data.subsetIndex)
+              } else {
+                const stats = {
+                  total: this.blockchain.getTotal(),
+                  rate: this.rates
+                }
+                logger.log(`CORE TOTAL:`, JSON.stringify(stats))
+                data.block.data.forEach((transaction) => {
+                  logger.log(`COMMITTEE BLOCK TRANSACTION:`, JSON.stringify(transaction))
+                  this.broadcastBlock(
+                    this.blockchain.committeeChain[transaction.hash],
+                    data.subsetIndex
+                  )
+                })
               }
-              logger.log(`CORE TOTAL:`, JSON.stringify(stats))
-              data.block.data.forEach((transaction) => {
-                logger.log(
-                  `COMMITTEE BLOCK TRANSACTION:`,
-                  JSON.stringify(transaction)
-                )
-                this.broadcastBlock(
-                  this.blockchain.committeeChain[transaction.hash],
-                  data.subsetIndex
-                )
-              })
             }
-          }
-          break
-        case MESSAGE_TYPE.rate_to_core:
-          // collect shards rates
-          if (
-            !this.rates[data.rate.shardIndex] ||
-            this.rates[data.rate.shardIndex].transactions <
-              data.rate.transactions[data.rate.shardIndex]
-          ) {
-            this.rates[data.rate.shardIndex] = {
-              transactions: data.rate.transactions?.[data.rate.shardIndex],
-              blocks: data.rate.blocks?.[data.rate.shardIndex],
-              shardStatus: data.rate.shardStatus
+            break
+          case MESSAGE_TYPE.rate_to_core:
+            // collect shards rates
+            if (
+              !this.rates[data.rate.shardIndex] ||
+              this.rates[data.rate.shardIndex].transactions <
+                data.rate.transactions[data.rate.shardIndex]
+            ) {
+              this.rates[data.rate.shardIndex] = {
+                transactions: data.rate.transactions?.[data.rate.shardIndex],
+                blocks: data.rate.blocks?.[data.rate.shardIndex],
+                shardStatus: data.rate.shardStatus
+              }
+              const { SHOULD_REDIRECT_FROM_FAULTY_NODES } = this.config
+              if (SHOULD_REDIRECT_FROM_FAULTY_NODES) {
+                this.handleFaultyShardRedirection()
+              }
             }
-            const { SHOULD_REDIRECT_FROM_FAULTY_NODES } = this.config
-            if (SHOULD_REDIRECT_FROM_FAULTY_NODES) {
-              this.handleFaultyShardRedirection()
-            }
-          }
-          logger.log(`CORE RATE:`, JSON.stringify(this.rates))
-          logger.log(`CORE TOTAL:`, JSON.stringify(data.total))
-          break
+            logger.log(`CORE RATE:`, JSON.stringify(this.rates))
+            logger.log(`CORE TOTAL:`, JSON.stringify(data.total))
+            break
+        }
       }
     })
   }

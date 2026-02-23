@@ -24,7 +24,7 @@ log() {
 # Configuration (use defaults from start.sh if not set)
 export NUMBER_OF_NODES=${NUMBER_OF_NODES:-4}
 export TRANSACTION_THRESHOLD=${TRANSACTION_THRESHOLD:-100}
-export BLOCK_THRESHOLD=${BLOCK_THRESHOLD:-10}
+export BLOCK_THRESHOLD=${BLOCK_THRESHOLD:-2}
 export NUMBER_OF_FAULTY_NODES=${NUMBER_OF_FAULTY_NODES:-0}
 export NUMBER_OF_NODES_PER_SHARD=${NUMBER_OF_NODES_PER_SHARD:-4}
 export HAS_COMMITTEE_SHARD=${HAS_COMMITTEE_SHARD:-1}
@@ -103,15 +103,24 @@ while true; do
     echo -ne "  Waiting for port forwarding... ${ELAPSED}s\r"
 done
 
-# Kill start.sh to prevent log streaming (but keep port forwarding alive)
+# Kill start.sh to prevent log streaming
 kill $START_PID 2>/dev/null || true
+wait $START_PID 2>/dev/null || true
+
+# Re-establish port forwarding (start.sh's subprocess port-forwards die with it)
+pkill -f "kubectl port-forward" 2>/dev/null || true
+sleep 2
+for ((i=0; i<NUMBER_OF_NODES; i++)); do
+    nohup kubectl port-forward pod/p2p-server-$i $((3001+i)):$((3001+i)) >> server.log 2>&1 &
+done
+sleep 5
 
 log "${GREEN}✓ Blockchain deployed and ready${NC}"
 echo
 
 # Step 2: Wait for blockchain to stabilize
 log "${BLUE}Step 2: Waiting for all nodes to be ready...${NC}"
-TIMEOUT=90
+TIMEOUT=150
 ELAPSED=0
 READY_COUNT=0
 
@@ -121,6 +130,11 @@ while [ $READY_COUNT -lt $NUMBER_OF_NODES ]; do
         PORT=$((3001+i))
         if curl -s -f http://localhost:$PORT/health > /dev/null 2>&1; then
             READY_COUNT=$((READY_COUNT + 1))
+        else
+            # Restart port-forward for this node if it's not responding
+            if ! pgrep -f "port-forward pod/p2p-server-$i $PORT" > /dev/null 2>&1; then
+                nohup kubectl port-forward pod/p2p-server-$i $PORT:$PORT >> server.log 2>&1 &
+            fi
         fi
     done
     
@@ -131,6 +145,11 @@ while [ $READY_COUNT -lt $NUMBER_OF_NODES ]; do
     if [ $ELAPSED -ge $TIMEOUT ]; then
         log "${RED}✗ Timeout waiting for nodes to be ready${NC}"
         log "${YELLOW}Only $READY_COUNT/$NUMBER_OF_NODES nodes are responding${NC}"
+        for ((i=0; i<NUMBER_OF_NODES; i++)); do
+            PORT=$((3001+i))
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$PORT/health 2>/dev/null || echo "unreachable")
+            log "  Node $i (port $PORT): $STATUS"
+        done
         exit 1
     fi
     
@@ -149,6 +168,20 @@ log "  Threads: ${JMETER_THREADS}"
 log "  Ramp-up: ${JMETER_RAMP_UP}s"
 echo
 
+# Start port-forward watchdog (restarts any dead forwards every 15s during JMeter)
+(
+    while true; do
+        sleep 15
+        for ((i=0; i<NUMBER_OF_NODES; i++)); do
+            PORT=$((3001+i))
+            if ! pgrep -f "port-forward pod/p2p-server-$i $PORT" > /dev/null 2>&1; then
+                nohup kubectl port-forward pod/p2p-server-$i $PORT:$PORT >> server.log 2>&1 &
+            fi
+        done
+    done
+) &
+WATCHDOG_PID=$!
+
 jmeter -n -t "Test Plan.jmx" \
     -Jthreads=${JMETER_THREADS} \
     -Jrampup=${JMETER_RAMP_UP} \
@@ -157,8 +190,19 @@ jmeter -n -t "Test Plan.jmx" \
     -l "${RESULTS_FILE}" \
     -e -o "${RESULTS_DIR}/pbft-rapidchain-${TIMESTAMP}-report" 2>&1 | tee -a server.log
 
+# Kill watchdog
+kill $WATCHDOG_PID 2>/dev/null || true
+
 log "${GREEN}✓ JMeter test completed${NC}"
 echo
+
+# Re-establish port-forwarding before stats collection (may have died during JMeter run)
+pkill -f "kubectl port-forward" 2>/dev/null || true
+sleep 1
+for ((i=0; i<NUMBER_OF_NODES; i++)); do
+    nohup kubectl port-forward pod/p2p-server-$i $((3001+i)):$((3001+i)) >> server.log 2>&1 &
+done
+sleep 4
 
 # Step 4: Collect blockchain statistics
 log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
@@ -194,24 +238,53 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
     echo "Blockchain Statistics (By Shard):"
     echo "=========================================="
     
+    # Helper: parse a scalar value from JSON using jq or python3
+    json_val() {
+        local json="$1"
+        local jq_expr="$2"
+        local py_expr="$3"
+        if command -v jq &> /dev/null; then
+            echo "$json" | jq -r "$jq_expr" 2>/dev/null
+        else
+            echo "$json" | python3 -c "import sys,json; data=json.load(sys.stdin); print($py_expr)" 2>/dev/null
+        fi
+    }
+
     # Simple approach: query one node and display shard stats
     # All nodes in a shard have the same blockchain state
     TOTAL_BLOCKS=0
     TOTAL_TX_IN_BLOCKS=0
     TOTAL_UNASSIGNED_TX=0
-    
-    PORT=3001
-    STATS=$(curl -s http://localhost:$PORT/stats 2>/dev/null || echo '{}')
-    
-    if [ "$STATS" != "{}" ] && command -v jq &> /dev/null; then
-        # Get all shard indices
-        SHARD_INDICES=$(echo "$STATS" | jq -r '.total | keys[]' 2>/dev/null)
-        
+
+    # Try all nodes; use the first one that returns valid JSON stats
+    STATS=''
+    for ((i=0; i<NUMBER_OF_NODES; i++)); do
+        PORT=$((3001+i))
+        CANDIDATE=$(curl -s --max-time 5 http://localhost:$PORT/stats 2>/dev/null || echo '')
+        if [ -n "$CANDIDATE" ] && echo "$CANDIDATE" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+            STATS="$CANDIDATE"
+            echo "  (Using stats from node $i, port $PORT)"
+            break
+        fi
+    done
+
+    if [ -n "$STATS" ]; then
+        # Get all shard indices (works with or without jq)
+        if command -v jq &> /dev/null; then
+            SHARD_INDICES=$(echo "$STATS" | jq -r '.total | keys[]' 2>/dev/null)
+        else
+            SHARD_INDICES=$(echo "$STATS" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(k) for k in d.get('total',{})]" 2>/dev/null)
+        fi
+
         for SHARD_IDX in $SHARD_INDICES; do
-            BLOCKS=$(echo "$STATS" | jq -r ".total[\"$SHARD_IDX\"].blocks // 0")
-            TX=$(echo "$STATS" | jq -r ".total[\"$SHARD_IDX\"].transactions // 0")
-            UNASSIGNED=$(echo "$STATS" | jq -r ".total[\"$SHARD_IDX\"].unassignedTransactions // 0")
-            
+            BLOCKS=$(json_val "$STATS" ".total[\"$SHARD_IDX\"].blocks // 0" "data['total']['$SHARD_IDX'].get('blocks',0)")
+            TX=$(json_val "$STATS" ".total[\"$SHARD_IDX\"].transactions // 0" "data['total']['$SHARD_IDX'].get('transactions',0)")
+            UNASSIGNED=$(json_val "$STATS" ".total[\"$SHARD_IDX\"].unassignedTransactions // 0" "data['total']['$SHARD_IDX'].get('unassignedTransactions',0)")
+
+            BLOCKS=${BLOCKS:-0}
+            TX=${TX:-0}
+            UNASSIGNED=${UNASSIGNED:-0}
+
             if [ "$SHARD_IDX" = "committee" ]; then
                 echo ""
                 echo "Shard committee:"
@@ -223,22 +296,14 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
             echo "  Blocks Created: $BLOCKS"
             echo "  Transactions in Blocks: $TX"
             echo "  Unassigned Transactions: $UNASSIGNED"
-            
+
             TOTAL_BLOCKS=$((TOTAL_BLOCKS + BLOCKS))
             TOTAL_TX_IN_BLOCKS=$((TOTAL_TX_IN_BLOCKS + TX))
             TOTAL_UNASSIGNED_TX=$((TOTAL_UNASSIGNED_TX + UNASSIGNED))
         done
     else
         echo ""
-        echo "(Install jq for detailed shard statistics: brew install jq)"
-        # Fallback: show raw node data
-        for ((i=0; i<NUMBER_OF_NODES; i++)); do
-            PORT=$((3001+i))
-            echo ""
-            echo "Node $i (port $PORT):"
-            STATS=$(curl -s http://localhost:$PORT/stats 2>/dev/null || echo '{"error": "unavailable"}')
-            echo "  $STATS"
-        done
+        echo "  (No node responded to /stats query)"
     fi
     
     echo ""

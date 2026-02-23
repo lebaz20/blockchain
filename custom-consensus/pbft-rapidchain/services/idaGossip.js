@@ -1,7 +1,8 @@
-const crypto = require('crypto-js')
+const nodeCrypto = require('crypto')
 const config = require('../config')
 const axios = require('axios')
 const { v1: uuidv1 } = require('uuid')
+const isEmpty = require('lodash/isEmpty')
 
 const { NUMBER_OF_NODES, DEFAULT_TTL, NUMBER_OF_NODES_PER_SHARD } = config.get()
 
@@ -34,21 +35,16 @@ class IDAGossip {
     Object.keys(this.socketGossipNodes)
       .filter((socketSubsetIndex) => socketSubsetIndex !== subsetIndex)
       .forEach((socketSubsetIndex) => {
-        Object.keys(this.socketGossipNodes[socketSubsetIndex]).forEach(
-          (socketPort) => {
-            const socket =
-              this.socketGossipNodes[socketSubsetIndex][socketPort].socket
-            sockets.push(socket)
-          }
-        )
+        Object.keys(this.socketGossipNodes[socketSubsetIndex]).forEach((socketPort) => {
+          const socket = this.socketGossipNodes[socketSubsetIndex][socketPort].socket
+          sockets.push(socket)
+        })
       })
     return sockets
   }
 
   getSubset(subsetIndex) {
-    return Object.values(this.socketGossipNodes[subsetIndex]).map(
-      ({ socket }) => socket
-    )
+    return Object.values(this.socketGossipNodes[subsetIndex]).map(({ socket }) => socket)
   }
 
   getSocketGossipPeers(sendersSubset, socketsKey = 'peers') {
@@ -60,9 +56,7 @@ class IDAGossip {
   getHTTPGossipPeers(sendersSubset) {
     return Array.from({ length: NUMBER_OF_NODES }, (_, index) => index)
       .filter((number_) => !sendersSubset.includes(number_))
-      .map(
-        (number_) => `http://p2p-server-${number_}:${3001 + number_}/message`
-      )
+      .map((number_) => `http://p2p-server-${number_}:${3001 + number_}/message`)
   }
 
   // Split data into IDA chunks
@@ -94,7 +88,7 @@ class IDAGossip {
       totalChunks = Math.ceil(requiredChunks * 1.5)
     }
 
-    const fileHash = crypto.SHA256(fileBuffer).toString()
+    const fileHash = nodeCrypto.createHash('sha256').update(fileBuffer).digest('hex')
     const chunkSize = Math.ceil(fileBuffer.length / requiredChunks)
     const chunks = []
 
@@ -106,7 +100,7 @@ class IDAGossip {
       chunks.push({
         id: uuidv1(),
         index: index,
-        data: fileBuffer.subarray(start, end),
+        data: fileBuffer.subarray(start, end).toString('base64'),
         totalChunks: requiredChunks,
         fileHash
       })
@@ -146,27 +140,25 @@ class IDAGossip {
   gossipChunk(message, ttl = DEFAULT_TTL) {
     if (ttl <= 0) return
 
-    const {
-      communicationType,
-      sendersSubset,
-      targetsSubset,
-      shouldGossip,
-      socketsKey
-    } = message
+    const { communicationType, sendersSubset, targetsSubset, shouldGossip, socketsKey } = message
     let peers
     if (communicationType === 'http') {
-      peers = targetsSubset ?? this.getHTTPGossipPeers(sendersSubset)
+      peers = isEmpty(targetsSubset) ? this.getHTTPGossipPeers(sendersSubset) : targetsSubset
     } else {
       if (targetsSubset === 'core') {
         peers = [this.getCoreSocket(socketsKey)]
       } else {
-        peers =
-          targetsSubset ?? this.getSocketGossipPeers(sendersSubset, socketsKey)
+        try {
+          peers = isEmpty(targetsSubset)
+            ? this.getSocketGossipPeers(sendersSubset, socketsKey)
+            : targetsSubset
+        } catch (error) {
+          console.error('Error getting peers for gossip:', error, message)
+          throw error
+        }
       }
     }
-    const randomPeers = shouldGossip
-      ? peers.sort(() => 0.5 - Math.random()).slice(0, 4)
-      : peers
+    const randomPeers = shouldGossip ? peers.sort(() => 0.5 - Math.random()).slice(0, 4) : peers
 
     const requests = randomPeers.map((peer) => {
       const messageToSend = {
@@ -217,15 +209,17 @@ class IDAGossip {
 
   broadcastFromCore({ message, chunkKey, sendersSubsetIndex }) {
     const targetsSubset = this.getOtherSubsets(sendersSubsetIndex)
-    return this.sendData({
-      message,
-      chunkKey,
-      communicationType: 'ws',
-      sendersSubset: [],
-      targetsSubset,
-      shouldGossip: true,
-      ttl: this.calculateTTL(NUMBER_OF_NODES)
-    })
+    if (targetsSubset.length > 0) {
+      return this.sendData({
+        message,
+        chunkKey,
+        communicationType: 'ws',
+        sendersSubset: [],
+        targetsSubset,
+        shouldGossip: true,
+        ttl: this.calculateTTL(NUMBER_OF_NODES)
+      })
+    }
   }
 
   sendFromCoreToSpecificShard({ message, chunkKey, targetsSubsetIndex }) {
@@ -274,7 +268,8 @@ class IDAGossip {
         communicationType,
         targetsSubset,
         shouldGossip,
-        socketsKey
+        socketsKey,
+        chunkKey
       }
       if (chunkKey) {
         processedMessage[chunkKey] = chunk
@@ -329,11 +324,14 @@ class IDAGossip {
       // Take only the required chunks for reconstruction
       const requiredChunks = chunks.slice(0, totalChunks)
       const reconstructedBuffer = Buffer.concat(
-        requiredChunks.map((chunk) => chunk.data)
+        requiredChunks.map((chunk) => Buffer.from(chunk.data, 'base64'))
       )
 
       // Verify file integrity
-      const reconstructedHash = crypto.SHA256(reconstructedBuffer).toString()
+      const reconstructedHash = nodeCrypto
+        .createHash('sha256')
+        .update(reconstructedBuffer)
+        .digest('hex')
 
       if (reconstructedHash === fileHash) {
         const jsonString = reconstructedBuffer.toString('utf8')

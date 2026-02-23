@@ -61,21 +61,13 @@ describe('Blockchain', () => {
     })
 
     it('should create core blockchain without chain when isCore=true', () => {
-      const coreBlockchain = new Blockchain(
-        validators,
-        mockTransactionPool,
-        true
-      )
+      const coreBlockchain = new Blockchain(validators, mockTransactionPool, true)
       expect(coreBlockchain.chain).toEqual({})
       expect(coreBlockchain.validatorList).toBeUndefined()
     })
 
     it('should initialize committeeChain when isCore=true', () => {
-      const coreBlockchain = new Blockchain(
-        validators,
-        mockTransactionPool,
-        true
-      )
+      const coreBlockchain = new Blockchain(validators, mockTransactionPool, true)
       expect(coreBlockchain.committeeChain).toBeDefined()
       expect(Array.isArray(coreBlockchain.committeeChain)).toBe(true)
       expect(coreBlockchain.committeeChain.length).toBe(1)
@@ -91,9 +83,7 @@ describe('Blockchain', () => {
       blockchain.addBlock(block)
 
       expect(blockchain.chain.SUBSET0.length).toBe(initialLength + 1)
-      expect(
-        blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]
-      ).toBe(block)
+      expect(blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]).toBe(block)
     })
 
     it('should set createdAt timestamp on block', () => {
@@ -124,20 +114,14 @@ describe('Blockchain', () => {
     })
 
     it('should add block to committeeChain when isCommittee=true', () => {
-      const coreBlockchain = new Blockchain(
-        validators,
-        mockTransactionPool,
-        true
-      )
+      const coreBlockchain = new Blockchain(validators, mockTransactionPool, true)
       const block = { hash: 'committee-hash', data: [], createdAt: Date.now() }
       const initialLength = coreBlockchain.committeeChain.length
 
       coreBlockchain.addBlock(block, undefined, true)
 
       expect(coreBlockchain.committeeChain.length).toBe(initialLength + 1)
-      expect(
-        coreBlockchain.committeeChain[coreBlockchain.committeeChain.length - 1]
-      ).toBe(block)
+      expect(coreBlockchain.committeeChain[coreBlockchain.committeeChain.length - 1]).toBe(block)
     })
 
     it('should add block to regular chain when isCommittee=false', () => {
@@ -147,9 +131,7 @@ describe('Blockchain', () => {
       blockchain.addBlock(block, 'SUBSET0', false)
 
       expect(blockchain.chain.SUBSET0.length).toBe(initialLength + 1)
-      expect(
-        blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]
-      ).toBe(block)
+      expect(blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]).toBe(block)
     })
   })
 
@@ -184,8 +166,7 @@ describe('Blockchain', () => {
 
       const block = blockchain.createBlock(transactions, wallet)
 
-      const lastBlock =
-        blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]
+      const lastBlock = blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]
       expect(block.lastHash).toBe(lastBlock.hash)
     })
   })
@@ -282,15 +263,18 @@ describe('Blockchain', () => {
   })
 
   describe('waitUntilAvailableBlock', () => {
-    jest.setTimeout(10000)
+    beforeEach(() => {
+      jest.useFakeTimers()
+    })
+
+    afterEach(() => {
+      jest.useRealTimers()
+    })
 
     it('should resolve immediately if item exists', async () => {
       const existingCheck = jest.fn().mockReturnValue(true)
 
-      const result = await blockchain.waitUntilAvailableBlock(
-        'item',
-        existingCheck
-      )
+      const result = await blockchain.waitUntilAvailableBlock('item', existingCheck)
 
       expect(result).toBe(true)
       expect(existingCheck).toHaveBeenCalledWith('item')
@@ -299,13 +283,12 @@ describe('Blockchain', () => {
     it('should resolve false after max retries', async () => {
       const existingCheck = jest.fn().mockReturnValue(false)
 
-      const result = await blockchain.waitUntilAvailableBlock(
-        'item',
-        existingCheck
-      )
+      const resultPromise = blockchain.waitUntilAvailableBlock('item', existingCheck)
+      await jest.runAllTimersAsync()
 
+      const result = await resultPromise
       expect(result).toBe(false)
-    }, 60000)
+    })
 
     it('should retry until item becomes available', async () => {
       let callCount = 0
@@ -314,11 +297,10 @@ describe('Blockchain', () => {
         return callCount >= 2 // Make it succeed on 2nd try instead of 3rd
       })
 
-      const result = await blockchain.waitUntilAvailableBlock(
-        'item',
-        existingCheck
-      )
+      const resultPromise = blockchain.waitUntilAvailableBlock('item', existingCheck)
+      await jest.runAllTimersAsync()
 
+      const result = await resultPromise
       expect(result).toBe(true)
       expect(callCount).toBeGreaterThanOrEqual(2)
     })
@@ -381,12 +363,7 @@ describe('Blockchain', () => {
       const previousBlock = blockchain.chain.SUBSET0[blocksCount - 1]
 
       // Test with isCommittee=false
-      const isValid = blockchain.isValidBlock(
-        block,
-        blocksCount,
-        previousBlock,
-        false
-      )
+      const isValid = blockchain.isValidBlock(block, blocksCount, previousBlock, false)
 
       expect(isValid).toBe(true)
     })

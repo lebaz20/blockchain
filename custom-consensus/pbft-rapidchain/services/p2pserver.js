@@ -62,13 +62,7 @@ class P2pserver {
       const isCommittee = parsedUrl.searchParams.get('isCommittee')
       const isCommitteeFlag = isCommittee === 'true'
       logger.log(`new connection from ${port} to ${P2P_PORT}`)
-      this.connectSocket(
-        socket,
-        port,
-        isFaulty === 'true',
-        false,
-        isCommitteeFlag
-      )
+      this.connectSocket(socket, port, isFaulty === 'true', false, isCommitteeFlag)
       this.messageHandler(socket, false, isCommitteeFlag)
     })
     this.connectToPeers()
@@ -95,18 +89,10 @@ class P2pserver {
       logger.log(
         `COMMITTEE PEERS`,
         P2P_PORT,
-        JSON.stringify(
-          Object.keys(this.sockets.committeePeers).map((port) => ({ port }))
-        )
+        JSON.stringify(Object.keys(this.sockets.committeePeers).map((port) => ({ port })))
       )
-      logger.log(
-        `RATE INTERVAL BROADCAST ${SUBSET_INDEX}`,
-        JSON.stringify(rate)
-      )
-      logger.log(
-        `TOTAL INTERVAL BROADCAST ${SUBSET_INDEX}`,
-        JSON.stringify(total)
-      )
+      logger.log(`RATE INTERVAL BROADCAST ${SUBSET_INDEX}`, JSON.stringify(rate))
+      logger.log(`TOTAL INTERVAL BROADCAST ${SUBSET_INDEX}`, JSON.stringify(total))
       this.broadcastRateToCore(rate, total)
     }, TIMEOUTS.RATE_BROADCAST_INTERVAL_MS)
   }
@@ -153,10 +139,7 @@ class P2pserver {
             return true
           })
           .catch(() => {
-            setTimeout(
-              checkWebServer,
-              retryInterval + TIMEOUTS.HEALTH_CHECK_RETRY_MS
-            )
+            setTimeout(checkWebServer, retryInterval + TIMEOUTS.HEALTH_CHECK_RETRY_MS)
           })
       }
 
@@ -167,9 +150,7 @@ class P2pserver {
   // connects to the peers passed in command line
   async connectToPeers() {
     await Promise.all(
-      PEERS.map((peer) =>
-        this.waitForWebServer(peer.replace('ws', 'http').replace(':5', ':3'))
-      )
+      PEERS.map((peer) => this.waitForWebServer(peer.replace('ws', 'http').replace(':5', ':3')))
     )
     PEERS.forEach((peer) => {
       const connectPeer = () => {
@@ -181,9 +162,7 @@ class P2pserver {
           setTimeout(connectPeer, TIMEOUTS.PEER_RECONNECT_DELAY_MS)
         })
         socket.on('open', () => {
-          logger.log(
-            `new connection from inside ${P2P_PORT} to ${peer.split(':')[2]}`
-          )
+          logger.log(`new connection from inside ${P2P_PORT} to ${peer.split(':')[2]}`)
           this.connectSocket(socket, peer.split(':')[2], false, false, false)
           this.messageHandler(socket, false, false)
         })
@@ -195,9 +174,7 @@ class P2pserver {
   async connectToCommitteePeers() {
     await Promise.all(
       COMMITTEE_PEERS.map((committeePeer) =>
-        this.waitForWebServer(
-          committeePeer.replace('ws', 'http').replace(':5', ':3')
-        )
+        this.waitForWebServer(committeePeer.replace('ws', 'http').replace(':5', ':3'))
       )
     )
     COMMITTEE_PEERS.forEach((committeePeer) => {
@@ -206,23 +183,12 @@ class P2pserver {
           `${committeePeer}?port=${P2P_PORT}&isFaulty=${IS_FAULTY ? 'true' : 'false'}&isCommittee=true&subsetIndex=${SUBSET_INDEX}&httpPort=${process.env.HTTP_PORT}`
         )
         socket.on('error', (error) => {
-          logger.error(
-            `Failed to connect to committee peer. Retrying in 5s...`,
-            error
-          )
+          logger.error(`Failed to connect to committee peer. Retrying in 5s...`, error)
           setTimeout(connectCommitteePeer, TIMEOUTS.PEER_RECONNECT_DELAY_MS)
         })
         socket.on('open', () => {
-          logger.log(
-            `new connection from inside ${P2P_PORT} to ${committeePeer.split(':')[2]}`
-          )
-          this.connectSocket(
-            socket,
-            committeePeer.split(':')[2],
-            false,
-            false,
-            true
-          )
+          logger.log(`new connection from inside ${P2P_PORT} to ${committeePeer.split(':')[2]}`)
+          this.connectSocket(socket, committeePeer.split(':')[2], false, false, true)
           this.messageHandler(socket, false, true)
         })
       }
@@ -240,9 +206,7 @@ class P2pserver {
         setTimeout(connectCore, TIMEOUTS.PEER_RECONNECT_DELAY_MS)
       })
       socket.on('open', () => {
-        logger.log(
-          `new connection from inside ${P2P_PORT} to ${CORE.split(':')[2]}`
-        )
+        logger.log(`new connection from inside ${P2P_PORT} to ${CORE.split(':')[2]}`)
         this.connectSocket(socket, CORE.split(':')[2], false, true, isCommittee)
         this.messageHandler(socket, true, isCommittee)
       })
@@ -364,7 +328,9 @@ class P2pserver {
         }
         const data = JSON.parse(message)
         const processedData = this.idaGossip.handleChunk(data)
-        this.parseMessage(processedData, isCore, isCommittee)
+        if (processedData) {
+          this.parseMessage(processedData, isCore, isCommittee)
+        }
       } catch (error) {
         logger.error('Failed to parse message:', error.message)
       }
@@ -386,8 +352,7 @@ class P2pserver {
 
       const isInactive =
         lastTransactionTime &&
-        now - lastTransactionTime >=
-          TIMEOUTS.TRANSACTION_INACTIVITY_THRESHOLD_MS
+        now - lastTransactionTime >= TIMEOUTS.TRANSACTION_INACTIVITY_THRESHOLD_MS
 
       // ============================================================================
       // TRANSACTION REDISTRIBUTION MECHANISM (TIMEOUT-BASED WORKAROUND)
@@ -440,11 +405,7 @@ class P2pserver {
       // a proper architectural solution. It sacrifices efficiency for availability.
       // ============================================================================
       if (!isProposer && unassignedCount >= TRANSACTION_THRESHOLD / 2) {
-        logger.log(
-          P2P_PORT,
-          'NON-PROPOSER WITH MANY TXs - Redistributing:',
-          unassignedCount
-        )
+        logger.log(P2P_PORT, 'NON-PROPOSER WITH MANY TXs - Redistributing:', unassignedCount)
         const txArray = isCommittee
           ? this.transactionPool.committeeTransactions.unassigned
           : this.transactionPool.transactions.unassigned
@@ -461,47 +422,28 @@ class P2pserver {
   }
 
   _canProposeBlock(isCommittee) {
-    const blocksPool = isCommittee
-      ? this.blockPool.committeeBlocks
-      : this.blockPool.blocks
+    const blocksPool = isCommittee ? this.blockPool.committeeBlocks : this.blockPool.blocks
     const lastUnpersistedBlock = blocksPool[blocksPool.length - 1]
-    const inflightBlocks = this.transactionPool.getInflightBlocks(
-      undefined,
-      isCommittee
-    )
+    const inflightBlocks = this.transactionPool.getInflightBlocks(undefined, isCommittee)
 
     if (inflightBlocks.length > 1) {
-      return this.preparePool.isBlockPrepared(
-        lastUnpersistedBlock,
-        this.wallet,
-        isCommittee
-      )
+      return this.preparePool.isBlockPrepared(lastUnpersistedBlock, this.wallet, isCommittee)
     }
     return true
   }
 
   _createAndBroadcastBlock(port, isCommittee) {
-    const blocksPool = isCommittee
-      ? this.blockPool.committeeBlocks
-      : this.blockPool.blocks
+    const blocksPool = isCommittee ? this.blockPool.committeeBlocks : this.blockPool.blocks
     const lastUnpersistedBlock = blocksPool[blocksPool.length - 1]
-    const inflightBlocks = this.transactionPool.getInflightBlocks(
-      undefined,
-      isCommittee
-    )
+    const inflightBlocks = this.transactionPool.getInflightBlocks(undefined, isCommittee)
     const threshold = isCommittee ? BLOCK_THRESHOLD : TRANSACTION_THRESHOLD
     const unassignedTransactions = isCommittee
       ? this.transactionPool.committeeTransactions.unassigned
       : this.transactionPool.transactions.unassigned
 
-    const previousBlock =
-      inflightBlocks.length > 1 ? lastUnpersistedBlock : undefined
+    const previousBlock = inflightBlocks.length > 1 ? lastUnpersistedBlock : undefined
     const transactionsBatch = unassignedTransactions.splice(0, threshold)
-    const block = this.blockchain.createBlock(
-      transactionsBatch,
-      this.wallet,
-      previousBlock
-    )
+    const block = this.blockchain.createBlock(transactionsBatch, this.wallet, previousBlock)
 
     logger.log(
       P2P_PORT,
@@ -518,20 +460,10 @@ class P2pserver {
       ? this.blockchain.committeeChain.length
       : this.blockchain.chain[SUBSET_INDEX].length
 
-    this.broadcastPrePrepare(
-      port,
-      block,
-      blocksCount,
-      previousBlock,
-      isCommittee
-    )
+    this.broadcastPrePrepare(port, block, blocksCount, previousBlock, isCommittee)
   }
 
-  initiateBlockCreation(
-    port,
-    _triggeredByTransaction = true,
-    isCommittee = false
-  ) {
+  initiateBlockCreation(port, _triggeredByTransaction = true, isCommittee = false) {
     if (isCommittee) {
       this.lastCommitteeTransactionCreatedAt = new Date()
     } else {
@@ -561,13 +493,9 @@ class P2pserver {
 
     const readyToPropose = this._canProposeBlock(isCommittee)
     const proposerObject = this.blockchain.getProposer(undefined, isCommittee)
-    const inflightBlocks = this.transactionPool.getInflightBlocks(
-      undefined,
-      isCommittee
-    )
+    const inflightBlocks = this.transactionPool.getInflightBlocks(undefined, isCommittee)
     const isProposer = proposerObject.proposer === this.wallet.getPublicKey()
-    const canCreateBlock =
-      isProposer && readyToPropose && inflightBlocks.length <= 4
+    const canCreateBlock = isProposer && readyToPropose && inflightBlocks.length <= 4
 
     logger.log(
       P2P_PORT,
@@ -626,29 +554,14 @@ class P2pserver {
     const { block, previousBlock, blocksCount } = data.data
     if (
       !this.blockPool.existingBlock(block, isCommittee) &&
-      this.blockchain.isValidBlock(
-        block,
-        blocksCount,
-        previousBlock,
-        isCommittee
-      )
+      this.blockchain.isValidBlock(block, blocksCount, previousBlock, isCommittee)
     ) {
       this.blockPool.addBlock(block, isCommittee)
       this.transactionPool.assignTransactions(block, isCommittee)
-      this.broadcastPrePrepare(
-        data.port,
-        block,
-        blocksCount,
-        previousBlock,
-        isCommittee
-      )
+      this.broadcastPrePrepare(data.port, block, blocksCount, previousBlock, isCommittee)
 
       if (block?.hash) {
-        const prepare = this.preparePool.prepare(
-          block,
-          this.wallet,
-          isCommittee
-        )
+        const prepare = this.preparePool.prepare(block, this.wallet, isCommittee)
         this.broadcastPrepare(data.port, prepare, isCommittee)
       }
     }
@@ -668,11 +581,7 @@ class P2pserver {
         : this.preparePool.list[data.prepare.blockHash]
 
       if (prepareList.length >= MIN_APPROVALS) {
-        const commit = this.commitPool.commit(
-          data.prepare,
-          this.wallet,
-          isCommittee
-        )
+        const commit = this.commitPool.commit(data.prepare, this.wallet, isCommittee)
         this.broadcastCommit(data.port, commit, isCommittee)
       }
     }
@@ -687,14 +596,8 @@ class P2pserver {
       this.commitPool.addCommit(data.commit, isCommittee)
       this.broadcastCommit(data.port, data.commit, isCommittee)
 
-      const commitList = this.commitPool.getList(
-        data.commit.blockHash,
-        isCommittee
-      )
-      const blockNotInChain = !this.blockchain.existingBlock(
-        data.commit.blockHash,
-        isCommittee
-      )
+      const commitList = this.commitPool.getList(data.commit.blockHash, isCommittee)
+      const blockNotInChain = !this.blockchain.existingBlock(data.commit.blockHash, isCommittee)
 
       if (commitList.length >= MIN_APPROVALS && blockNotInChain) {
         const result = await this.blockchain.addUpdatedBlock(
@@ -719,17 +622,10 @@ class P2pserver {
           )
 
           const latestBlock = isCommittee
-            ? this.blockchain.committeeChain[
-                this.blockchain.committeeChain.length - 1
-              ]
-            : this.blockchain.chain[SUBSET_INDEX][
-                this.blockchain.chain[SUBSET_INDEX].length - 1
-              ]
+            ? this.blockchain.committeeChain[this.blockchain.committeeChain.length - 1]
+            : this.blockchain.chain[SUBSET_INDEX][this.blockchain.chain[SUBSET_INDEX].length - 1]
 
-          const message = this.messagePool.createMessage(
-            latestBlock,
-            this.wallet
-          )
+          const message = this.messagePool.createMessage(latestBlock, this.wallet)
           this.broadcastRoundChange(data.port, message, isCommittee)
         } else {
           const chainLength = isCommittee
@@ -748,14 +644,9 @@ class P2pserver {
           const stats = {
             total: this.blockchain.getTotal(),
             rate,
-            unassignedTransactions:
-              this.transactionPool.transactions.unassigned.length
+            unassignedTransactions: this.transactionPool.transactions.unassigned.length
           }
-          logger.log(
-            P2P_PORT,
-            `P2P STATS FOR #${SUBSET_INDEX}:`,
-            JSON.stringify(stats)
-          )
+          logger.log(P2P_PORT, `P2P STATS FOR #${SUBSET_INDEX}:`, JSON.stringify(stats))
         }
       }
     }
@@ -779,25 +670,14 @@ class P2pserver {
           ? this.transactionPool.committeeTransactions[data.message.blockHash]
           : this.transactionPool.transactions[data.message.blockHash]
 
-        logger.log(
-          P2P_PORT,
-          'TRANSACTION POOL TO BE CLEARED, TOTAL NOW:',
-          transactionList?.length
-        )
-        this.transactionPool.clear(
-          data.message.blockHash,
-          data.message.data,
-          isCommittee
-        )
+        logger.log(P2P_PORT, 'TRANSACTION POOL TO BE CLEARED, TOTAL NOW:', transactionList?.length)
+        this.transactionPool.clear(data.message.blockHash, data.message.data, isCommittee)
       }
     }
   }
 
   async _handleBlockFromCore(data, isCore, isCommittee) {
-    const blockNotInChain = !this.blockchain.existingBlock(
-      data.block.hash,
-      data.subsetIndex
-    )
+    const blockNotInChain = !this.blockchain.existingBlock(data.block.hash, data.subsetIndex)
     const isDifferentShard = data.subsetIndex !== SUBSET_INDEX
 
     if (blockNotInChain && isDifferentShard && isCore === true) {
@@ -805,11 +685,7 @@ class P2pserver {
         this.blockchain.addBlock(data.block, data.subsetIndex)
         const rate = await this.blockchain.getRate(this.sockets.peers)
         const stats = { total: this.blockchain.getTotal(), rate }
-        logger.log(
-          P2P_PORT,
-          `P2P STATS FOR #${SUBSET_INDEX}:`,
-          JSON.stringify(stats)
-        )
+        logger.log(P2P_PORT, `P2P STATS FOR #${SUBSET_INDEX}:`, JSON.stringify(stats))
       } else {
         const transaction = this.wallet.createTransaction({
           data: data.block.data,
@@ -839,11 +715,7 @@ class P2pserver {
       data.config.forEach((item) => {
         config.set(item.key, item.value)
       })
-      logger.log(
-        P2P_PORT,
-        `CONFIG UPDATE FOR #${SUBSET_INDEX}:`,
-        JSON.stringify(data.config)
-      )
+      logger.log(P2P_PORT, `CONFIG UPDATE FOR #${SUBSET_INDEX}:`, JSON.stringify(data.config))
     }
   }
 

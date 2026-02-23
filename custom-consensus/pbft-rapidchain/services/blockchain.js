@@ -14,13 +14,8 @@ const CPU_OVER_UTILIZED_THRESHOLD = 70
 const RateUtility = require('../utils/rate')
 const { readCgroupCPUPercentPromise } = require('../utils/cpu')
 const { SHARD_STATUS } = require('../constants/status')
-const {
-  NODES_SUBSET,
-  NUMBER_OF_NODES_PER_SHARD,
-  SUBSET_INDEX,
-  IS_FAULTY,
-  MIN_APPROVALS
-} = config.get()
+const { NODES_SUBSET, NUMBER_OF_NODES_PER_SHARD, SUBSET_INDEX, IS_FAULTY, MIN_APPROVALS } =
+  config.get()
 
 class Blockchain {
   constructor(validators, transactionPool, isCore = false) {
@@ -51,10 +46,7 @@ class Blockchain {
       if (!this.ratePerMin[subsetIndex]) {
         this.ratePerMin[subsetIndex] = {}
       }
-      RateUtility.updateRatePerMin(
-        this.ratePerMin[subsetIndex],
-        block.createdAt
-      )
+      RateUtility.updateRatePerMin(this.ratePerMin[subsetIndex], block.createdAt)
       this.chain[subsetIndex].push(block)
       logger.log('NEW BLOCK ADDED TO CHAIN')
       return block
@@ -63,8 +55,7 @@ class Blockchain {
 
   createBlock(transactions, wallet, previousBlock = undefined) {
     const block = Block.createBlock(
-      previousBlock ??
-        this.chain[SUBSET_INDEX][this.chain[SUBSET_INDEX].length - 1],
+      previousBlock ?? this.chain[SUBSET_INDEX][this.chain[SUBSET_INDEX].length - 1],
       transactions,
       wallet
     )
@@ -80,8 +71,7 @@ class Blockchain {
     }
 
     const currentMinute = new Date().getMinutes()
-    const hashCharCode =
-      chain[SUBSET_INDEX][blockIndex].hash[HASH_FIRST_CHAR_INDEX].charCodeAt(0)
+    const hashCharCode = chain[SUBSET_INDEX][blockIndex].hash[HASH_FIRST_CHAR_INDEX].charCodeAt(0)
     const proposerRotationModulo = NUMBER_OF_NODES_PER_SHARD
     const index = (hashCharCode + currentMinute) % proposerRotationModulo
     return {
@@ -90,24 +80,15 @@ class Blockchain {
     }
   }
 
-  isValidBlock(
-    block,
-    blocksCount,
-    previousBlock = undefined,
-    isCommittee = false
-  ) {
+  isValidBlock(block, blocksCount, previousBlock = undefined, isCommittee = false) {
     const chain = isCommittee ? this.committeeChain : this.chain
-    const lastBlock =
-      previousBlock ?? chain[SUBSET_INDEX][chain[SUBSET_INDEX].length - 1]
+    const lastBlock = previousBlock ?? chain[SUBSET_INDEX][chain[SUBSET_INDEX].length - 1]
     if (
       lastBlock.sequenceNo + 1 === block.sequenceNo &&
       block.lastHash === lastBlock.hash &&
       block.hash === Block.blockHash(block) &&
       Block.verifyBlock(block) &&
-      Block.verifyProposer(
-        block,
-        this.getProposer(blocksCount, isCommittee).proposer
-      )
+      Block.verifyProposer(block, this.getProposer(blocksCount, isCommittee).proposer)
     ) {
       logger.log('BLOCK VALID')
       return true
@@ -117,10 +98,7 @@ class Blockchain {
         block.lastHash === lastBlock.hash,
         block.hash === Block.blockHash(block),
         Block.verifyBlock(block),
-        Block.verifyProposer(
-          block,
-          this.getProposer(blocksCount, isCommittee).proposer
-        )
+        Block.verifyProposer(block, this.getProposer(blocksCount, isCommittee).proposer)
       )
       logger.error('BLOCK INVALID')
       return false
@@ -128,31 +106,17 @@ class Blockchain {
   }
 
   // eslint-disable-next-line max-params
-  async addUpdatedBlock(
-    hash,
-    blockPool,
-    preparePool,
-    commitPool,
-    isCommittee = false
-  ) {
+  async addUpdatedBlock(hash, blockPool, preparePool, commitPool, isCommittee = false) {
     const blockExists = await this.waitUntilAvailableBlock(hash, (hash) =>
       blockPool.existingBlockByHash(hash, isCommittee)
     )
     if (blockExists) {
       const block = blockPool.getBlock(hash, isCommittee)
-      const previousBlockExists = await this.waitUntilAvailableBlock(
-        block.lastHash,
-        (hash) => this.existingBlock(hash, SUBSET_INDEX, isCommittee)
+      const previousBlockExists = await this.waitUntilAvailableBlock(block.lastHash, (hash) =>
+        this.existingBlock(hash, SUBSET_INDEX, isCommittee)
       )
-      if (
-        previousBlockExists &&
-        this.transactionPool.hashExists(block.hash, isCommittee)
-      ) {
-        this.transactionPool.removeDuplicates(
-          block.hash,
-          block.data,
-          isCommittee
-        )
+      if (previousBlockExists && this.transactionPool.hashExists(block.hash, isCommittee)) {
+        this.transactionPool.removeDuplicates(block.hash, block.data, isCommittee)
         block.prepareMessages = preparePool.getList(hash, isCommittee)
         block.commitMessages = commitPool.getList(hash, isCommittee)
         this.addBlock(block, SUBSET_INDEX, isCommittee)
@@ -166,9 +130,9 @@ class Blockchain {
   }
 
   existingBlock(hash, subsetIndex = SUBSET_INDEX, isCommittee = false) {
-    return !!(
-      isCommittee ? this.committeeChain : this.chain[subsetIndex]
-    )?.find((b) => b.hash === hash)
+    return !!(isCommittee ? this.committeeChain : this.chain[subsetIndex])?.find(
+      (b) => b.hash === hash
+    )
   }
 
   waitUntilAvailableBlock(item, existingCheck) {
@@ -178,11 +142,7 @@ class Blockchain {
           resolve(true)
         } else if (retrialCount <= MAX_RETRY_ATTEMPTS) {
           setTimeout(
-            () =>
-              recExistingCheck(
-                retryInterval + RETRY_INTERVAL_INCREMENT_MS,
-                retryInterval + 1
-              ),
+            () => recExistingCheck(retryInterval + RETRY_INTERVAL_INCREMENT_MS, retrialCount + 1),
             retryInterval + RETRY_INTERVAL_INCREMENT_MS
           )
         } else {
@@ -200,12 +160,8 @@ class Blockchain {
       const actualBlocksCount = this.chain[subsetIndex].length
       total[subsetIndex] = {
         blocks: actualBlocksCount,
-        transactions: this.chain[subsetIndex].reduce(
-          (sum, block) => sum + block.data.length,
-          0
-        ),
-        unassignedTransactions:
-          this.transactionPool?.transactions.unassigned.length
+        transactions: this.chain[subsetIndex].reduce((sum, block) => sum + block.data.length, 0),
+        unassignedTransactions: this.transactionPool?.transactions.unassigned.length
       }
     })
     return total
@@ -213,9 +169,7 @@ class Blockchain {
 
   // get shard rate of blocks and transactions
   async getRate(sockets) {
-    let nonFaultyNodesCount = Object.keys(sockets).filter(
-      (port) => !sockets[port].isFaulty
-    ).length
+    let nonFaultyNodesCount = Object.keys(sockets).filter((port) => !sockets[port].isFaulty).length
     if (!IS_FAULTY) {
       nonFaultyNodesCount++
     }
@@ -234,10 +188,7 @@ class Blockchain {
       }
     }
     Object.keys(this.chain).forEach((subsetIndex) => {
-      const blocksRate = RateUtility.getRatePerMin(
-        this.ratePerMin[subsetIndex],
-        previousMinute
-      )
+      const blocksRate = RateUtility.getRatePerMin(this.ratePerMin[subsetIndex], previousMinute)
       rate.blocks[subsetIndex] = blocksRate
       // if (subsetIndex === SUBSET_INDEX) {
       //   currentShardBlocksRate = blocksRate;

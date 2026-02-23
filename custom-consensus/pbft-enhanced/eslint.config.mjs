@@ -7,7 +7,7 @@ import pluginPromise from 'eslint-plugin-promise'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['*.config.mjs']),
+  globalIgnores(['*.config.mjs', 'performance-results/**']),
   {
     files: ['**/*.{js,mjs,cjs}'],
     languageOptions: {

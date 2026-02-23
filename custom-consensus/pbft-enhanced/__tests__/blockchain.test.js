@@ -61,11 +61,7 @@ describe('Blockchain', () => {
     })
 
     it('should create core blockchain without chain when isCore=true', () => {
-      const coreBlockchain = new Blockchain(
-        validators,
-        mockTransactionPool,
-        true
-      )
+      const coreBlockchain = new Blockchain(validators, mockTransactionPool, true)
       expect(coreBlockchain.chain).toEqual({})
       expect(coreBlockchain.validatorList).toBeUndefined()
     })
@@ -79,9 +75,7 @@ describe('Blockchain', () => {
       blockchain.addBlock(block)
 
       expect(blockchain.chain.SUBSET0.length).toBe(initialLength + 1)
-      expect(
-        blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]
-      ).toBe(block)
+      expect(blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]).toBe(block)
     })
 
     it('should set createdAt timestamp on block', () => {
@@ -143,8 +137,7 @@ describe('Blockchain', () => {
 
       const block = blockchain.createBlock(transactions, wallet)
 
-      const lastBlock =
-        blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]
+      const lastBlock = blockchain.chain.SUBSET0[blockchain.chain.SUBSET0.length - 1]
       expect(block.lastHash).toBe(lastBlock.hash)
     })
   })
@@ -233,15 +226,18 @@ describe('Blockchain', () => {
   })
 
   describe('waitUntilAvailableBlock', () => {
-    jest.setTimeout(10000)
+    beforeEach(() => {
+      jest.useFakeTimers()
+    })
+
+    afterEach(() => {
+      jest.useRealTimers()
+    })
 
     it('should resolve immediately if item exists', async () => {
       const existingCheck = jest.fn().mockReturnValue(true)
 
-      const result = await blockchain.waitUntilAvailableBlock(
-        'item',
-        existingCheck
-      )
+      const result = await blockchain.waitUntilAvailableBlock('item', existingCheck)
 
       expect(result).toBe(true)
       expect(existingCheck).toHaveBeenCalledWith('item')
@@ -250,26 +246,24 @@ describe('Blockchain', () => {
     it('should resolve false after max retries', async () => {
       const existingCheck = jest.fn().mockReturnValue(false)
 
-      const result = await blockchain.waitUntilAvailableBlock(
-        'item',
-        existingCheck
-      )
+      const resultPromise = blockchain.waitUntilAvailableBlock('item', existingCheck)
+      await jest.runAllTimersAsync()
 
+      const result = await resultPromise
       expect(result).toBe(false)
-    }, 60000)
+    })
 
     it('should retry until item becomes available', async () => {
       let callCount = 0
       const existingCheck = jest.fn(() => {
         callCount++
-        return callCount >= 2 // Make it succeed on 2nd try instead of 3rd
+        return callCount >= 2
       })
 
-      const result = await blockchain.waitUntilAvailableBlock(
-        'item',
-        existingCheck
-      )
+      const resultPromise = blockchain.waitUntilAvailableBlock('item', existingCheck)
+      await jest.runAllTimersAsync()
 
+      const result = await resultPromise
       expect(result).toBe(true)
       expect(callCount).toBeGreaterThanOrEqual(2)
     })

@@ -447,7 +447,9 @@ class P2pserver {
         }
         const data = JSON.parse(message)
         const processedData = this.idaGossip.handleChunk(data)
-        this.parseMessage(processedData, isCore)
+        if (processedData) {
+          this.parseMessage(processedData, isCore)
+        }
       } catch (error) {
         logger.error('Failed to parse message:', error.message)
       }
