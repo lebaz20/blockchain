@@ -17,6 +17,8 @@ const { SHARD_STATUS } = require('../constants/status')
 const { NODES_SUBSET, NUMBER_OF_NODES_PER_SHARD, SUBSET_INDEX, IS_FAULTY, MIN_APPROVALS } =
   config.get()
 
+const CPU_CACHE_INTERVAL_MS = 5000
+
 class Blockchain {
   constructor(validators, transactionPool, isCore = false) {
     if (!isCore) {
@@ -30,6 +32,37 @@ class Blockchain {
     }
     // Track the rate of incoming blocks
     this.ratePerMin = {}
+    // Cache CPU percentage so getRate() responds instantly without a 1s wait
+    this._cpuCache = 0
+    if (!isCore) {
+      this._startCpuCacheUpdater()
+    }
+  }
+
+  _startCpuCacheUpdater() {
+    const update = () => {
+      // eslint-disable-next-line promise/catch-or-return
+      readCgroupCPUPercentPromise(CPU_CACHE_INTERVAL_MS)
+        .then((pct) => {
+          this._cpuCache = pct
+          return pct
+        })
+        .catch(() => {
+          // keep previous cached value on error
+          return null
+        })
+        .finally(() => {
+          this._cpuCacheTimer = setTimeout(update, CPU_CACHE_INTERVAL_MS)
+        })
+    }
+    update()
+  }
+
+  stopCpuCacheUpdater() {
+    if (this._cpuCacheTimer) {
+      clearTimeout(this._cpuCacheTimer)
+      this._cpuCacheTimer = null
+    }
   }
 
   addBlock(block, subsetIndex = SUBSET_INDEX) {
@@ -170,7 +203,8 @@ class Blockchain {
     const totalNodesCount = Object.keys(sockets).length + (IS_FAULTY ? 0 : 1)
     const nonFaultyNodesCount = totalNodesCount - faultyNodesCount
 
-    const cpuPercentage = await readCgroupCPUPercentPromise()
+    // Use cached CPU value — updated in background every CPU_CACHE_INTERVAL_MS
+    const cpuPercentage = this._cpuCache
     const previousMinute = RateUtility.getPreviousMinute()
     const currentShardTransactionsRate = RateUtility.getRatePerMin(
       this.transactionPool?.ratePerMin,

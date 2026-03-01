@@ -122,16 +122,19 @@ class IDAGossip {
   }
 
   sendSocketMessage(socket, data) {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       // Check if socket is open before sending
       if (!socket || socket.readyState !== 1) {
-        // WebSocket.OPEN = 1
-        reject(new Error('WebSocket is not open'))
+        // WebSocket.OPEN = 1 — peer disconnected, skip silently
+        resolve()
         return
       }
       socket.send(data, (error) => {
-        if (error) reject(error)
-        else resolve()
+        if (error) {
+          // EPIPE / send errors are expected in gossip when peers disconnect mid-send
+          console.warn('WebSocket send error (peer likely disconnected):', error.message)
+        }
+        resolve()
       })
     })
   }
@@ -170,12 +173,14 @@ class IDAGossip {
           method: 'post',
           url: peer,
           data: messageToSend
+        }).catch((error) => {
+          console.warn('HTTP gossip send error (peer likely unavailable):', error.message)
         })
       } else {
         return this.sendSocketMessage(peer, JSON.stringify(messageToSend))
       }
     })
-    return Promise.all(requests)
+    return Promise.allSettled(requests)
   }
 
   calculateTTL(numberNodes) {

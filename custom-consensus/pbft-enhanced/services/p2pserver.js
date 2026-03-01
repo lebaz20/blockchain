@@ -5,13 +5,7 @@ const logger = require('../utils/logger')
 const TIMEOUTS = require('../constants/timeouts')
 
 const config = require('../config')
-const {
-  NODES_SUBSET,
-  MIN_APPROVALS,
-  SUBSET_INDEX,
-  TRANSACTION_THRESHOLD,
-  IS_FAULTY
-} = config.get()
+const { NODES_SUBSET, MIN_APPROVALS, SUBSET_INDEX, TRANSACTION_THRESHOLD, IS_FAULTY } = config.get()
 
 const P2P_PORT = process.env.P2P_PORT || 5001
 
@@ -71,14 +65,8 @@ class P2pserver {
           }))
         )
       )
-      logger.log(
-        `RATE INTERVAL BROADCAST ${SUBSET_INDEX}`,
-        JSON.stringify(rate)
-      )
-      logger.log(
-        `TOTAL INTERVAL BROADCAST ${SUBSET_INDEX}`,
-        JSON.stringify(total)
-      )
+      logger.log(`RATE INTERVAL BROADCAST ${SUBSET_INDEX}`, JSON.stringify(rate))
+      logger.log(`TOTAL INTERVAL BROADCAST ${SUBSET_INDEX}`, JSON.stringify(total))
       this.broadcastRateToCore(rate, total)
     }, TIMEOUTS.RATE_BROADCAST_INTERVAL_MS)
   }
@@ -118,9 +106,7 @@ class P2pserver {
   // connects to the peers passed in command line
   async connectToPeers(nodes) {
     await Promise.all(
-      nodes.map((peer) =>
-        this.waitForWebServer(peer.replace('ws', 'http').replace(':5', ':3'))
-      )
+      nodes.map((peer) => this.waitForWebServer(peer.replace('ws', 'http').replace(':5', ':3')))
     )
     nodes.forEach((peer) => {
       const connectPeer = () => {
@@ -132,9 +118,7 @@ class P2pserver {
           setTimeout(connectPeer, TIMEOUTS.PEER_RECONNECT_DELAY_MS)
         })
         socket.on('open', () => {
-          logger.log(
-            `new connection from inside ${P2P_PORT} to ${peer.split(':')[2]}`
-          )
+          logger.log(`new connection from inside ${P2P_PORT} to ${peer.split(':')[2]}`)
           this.connectSocket(socket, peer.split(':')[2], false)
           this.messageHandler(socket, false)
         })
@@ -153,9 +137,7 @@ class P2pserver {
         setTimeout(connectCore, TIMEOUTS.PEER_RECONNECT_DELAY_MS)
       })
       socket.on('open', () => {
-        logger.log(
-          `new connection from inside ${P2P_PORT} to ${core.split(':')[2]}`
-        )
+        logger.log(`new connection from inside ${P2P_PORT} to ${core.split(':')[2]}`)
         this.connectSocket(socket, core.split(':')[2], false, true)
         this.messageHandler(socket, true)
       })
@@ -177,12 +159,7 @@ class P2pserver {
   }
 
   // broadcasts preprepare
-  broadcastPrePrepare(
-    senderPort,
-    block,
-    blocksCount,
-    previousBlock = undefined
-  ) {
+  broadcastPrePrepare(senderPort, block, blocksCount, previousBlock = undefined) {
     this.idaGossip.sendToShardPeers({
       message: {
         type: MESSAGE_TYPE.pre_prepare,
@@ -263,13 +240,13 @@ class P2pserver {
 
   _handleTransaction(data) {
     logger.log(
-        P2P_PORT,
-        'TRANSACTION RECEIVED, TOTAL NOW:',
-        JSON.stringify(data),
-        this.transactionPool.transactionExists(data.transaction),
-        this.transactionPool.verifyTransaction(data.transaction),
-        this.validators.isValidValidator(data.transaction.from)
-      )
+      P2P_PORT,
+      'TRANSACTION RECEIVED, TOTAL NOW:',
+      JSON.stringify(data),
+      this.transactionPool.transactionExists(data.transaction),
+      this.transactionPool.verifyTransaction(data.transaction),
+      this.validators.isValidValidator(data.transaction.from)
+    )
     if (
       !this.transactionPool.transactionExists(data.transaction) &&
       this.transactionPool.verifyTransaction(data.transaction) &&
@@ -315,9 +292,7 @@ class P2pserver {
       this.preparePool.addPrepare(data.prepare)
       this.broadcastPrepare(data.port, data.prepare)
 
-      if (
-        this.preparePool.list[data.prepare.blockHash].length >= MIN_APPROVALS
-      ) {
+      if (this.preparePool.list[data.prepare.blockHash].length >= MIN_APPROVALS) {
         const commit = this.commitPool.commit(data.prepare, this.wallet)
         this.broadcastCommit(data.port, commit)
       }
@@ -333,11 +308,8 @@ class P2pserver {
       this.commitPool.addCommit(data.commit)
       this.broadcastCommit(data.port, data.commit)
 
-      const commitReached =
-        this.commitPool.list[data.commit.blockHash].length >= MIN_APPROVALS
-      const blockNotInChain = !this.blockchain.existingBlock(
-        data.commit.blockHash
-      )
+      const commitReached = this.commitPool.list[data.commit.blockHash].length >= MIN_APPROVALS
+      const blockNotInChain = !this.blockchain.existingBlock(data.commit.blockHash)
 
       if (commitReached && blockNotInChain) {
         const result = await this.blockchain.addUpdatedBlock(
@@ -355,9 +327,7 @@ class P2pserver {
             data.commit.blockHash
           )
           const message = this.messagePool.createMessage(
-            this.blockchain.chain[SUBSET_INDEX][
-              this.blockchain.chain[SUBSET_INDEX].length - 1
-            ],
+            this.blockchain.chain[SUBSET_INDEX][this.blockchain.chain[SUBSET_INDEX].length - 1],
             this.wallet
           )
           this.broadcastRoundChange(data.port, message)
@@ -372,14 +342,9 @@ class P2pserver {
         const stats = {
           total: this.blockchain.getTotal(),
           rate,
-          unassignedTransactions:
-            this.transactionPool.transactions.unassigned.length
+          unassignedTransactions: this.transactionPool.transactions.unassigned.length
         }
-        logger.log(
-          P2P_PORT,
-          `P2P STATS FOR #${SUBSET_INDEX}:`,
-          JSON.stringify(stats)
-        )
+        logger.log(P2P_PORT, `P2P STATS FOR #${SUBSET_INDEX}:`, JSON.stringify(stats))
       }
     }
   }
@@ -408,21 +373,14 @@ class P2pserver {
   }
 
   async _handleBlockFromCore(data, isCore) {
-    const blockNotInChain = !this.blockchain.existingBlock(
-      data.block.hash,
-      data.subsetIndex
-    )
+    const blockNotInChain = !this.blockchain.existingBlock(data.block.hash, data.subsetIndex)
     const isDifferentShard = data.subsetIndex !== SUBSET_INDEX
 
     if (blockNotInChain && isDifferentShard && isCore === true) {
       this.blockchain.addBlock(data.block, data.subsetIndex)
       const rate = await this.blockchain.getRate(this.sockets)
       const stats = { total: this.blockchain.getTotal(), rate }
-      logger.log(
-        P2P_PORT,
-        `P2P STATS FOR #${SUBSET_INDEX}:`,
-        JSON.stringify(stats)
-      )
+      logger.log(P2P_PORT, `P2P STATS FOR #${SUBSET_INDEX}:`, JSON.stringify(stats))
     }
   }
 
@@ -431,11 +389,7 @@ class P2pserver {
       data.config.forEach((item) => {
         config.set(item.key, item.value)
       })
-      logger.log(
-        P2P_PORT,
-        `CONFIG UPDATE FOR #${SUBSET_INDEX}:`,
-        JSON.stringify(data.config)
-      )
+      logger.log(P2P_PORT, `CONFIG UPDATE FOR #${SUBSET_INDEX}:`, JSON.stringify(data.config))
     }
   }
 
@@ -462,12 +416,9 @@ class P2pserver {
       const now = new Date()
       const isInactive =
         this.lastTransactionCreatedAt &&
-        now - this.lastTransactionCreatedAt >=
-          TIMEOUTS.TRANSACTION_INACTIVITY_THRESHOLD_MS
-      const hasTransactions =
-        this.transactionPool.transactions.unassigned.length > 0
-      const transactionCount =
-        this.transactionPool.transactions.unassigned.length
+        now - this.lastTransactionCreatedAt >= TIMEOUTS.TRANSACTION_INACTIVITY_THRESHOLD_MS
+      const hasTransactions = this.transactionPool.transactions.unassigned.length > 0
+      const transactionCount = this.transactionPool.transactions.unassigned.length
       const proposerObject = this.blockchain.getProposer()
       const isProposer = proposerObject.proposer === this.wallet.getPublicKey()
 
@@ -519,15 +470,14 @@ class P2pserver {
       // This timeout-based approach is a WORKAROUND for load balancing issues, not
       // a proper architectural solution. It sacrifices efficiency for availability.
       // ============================================================================
-      if (!isProposer && transactionCount >= TRANSACTION_THRESHOLD / 2) {
+      if (!isProposer && transactionCount >= TRANSACTION_THRESHOLD / 4) {
         logger.log(
           P2P_PORT,
           'NON-PROPOSER WITH MANY TXs - Redistributing to network:',
           transactionCount
         )
         // Re-broadcast accumulated transactions to ensure proposer receives them
-        const txToRedistribute =
-          this.transactionPool.transactions.unassigned.slice(0, 50)
+        const txToRedistribute = this.transactionPool.transactions.unassigned.slice(0, 50)
         txToRedistribute.forEach((tx) => {
           this.broadcastTransaction(P2P_PORT, tx)
         })
@@ -540,8 +490,7 @@ class P2pserver {
   }
 
   _canProposeBlock() {
-    const lastUnpersistedBlock =
-      this.blockPool.blocks[this.blockPool.blocks.length - 1]
+    const lastUnpersistedBlock = this.blockPool.blocks[this.blockPool.blocks.length - 1]
     const inflightBlocks = this.transactionPool.getInflightBlocks()
 
     if (inflightBlocks.length > 1) {
@@ -551,21 +500,14 @@ class P2pserver {
   }
 
   _createAndBroadcastBlock(port) {
-    const lastUnpersistedBlock =
-      this.blockPool.blocks[this.blockPool.blocks.length - 1]
+    const lastUnpersistedBlock = this.blockPool.blocks[this.blockPool.blocks.length - 1]
     const inflightBlocks = this.transactionPool.getInflightBlocks()
-    const previousBlock =
-      inflightBlocks.length > 1 ? lastUnpersistedBlock : undefined
-    const transactionsBatch =
-      this.transactionPool.transactions.unassigned.splice(
-        0,
-        TRANSACTION_THRESHOLD
-      )
-    const block = this.blockchain.createBlock(
-      transactionsBatch,
-      this.wallet,
-      previousBlock
+    const previousBlock = inflightBlocks.length > 1 ? lastUnpersistedBlock : undefined
+    const transactionsBatch = this.transactionPool.transactions.unassigned.splice(
+      0,
+      TRANSACTION_THRESHOLD
     )
+    const block = this.blockchain.createBlock(transactionsBatch, this.wallet, previousBlock)
 
     logger.log(
       P2P_PORT,
@@ -578,12 +520,7 @@ class P2pserver {
     )
 
     this.transactionPool.assignTransactions(block)
-    this.broadcastPrePrepare(
-      port,
-      block,
-      this.blockchain.chain[SUBSET_INDEX].length,
-      previousBlock
-    )
+    this.broadcastPrePrepare(port, block, this.blockchain.chain[SUBSET_INDEX].length, previousBlock)
   }
 
   initiateBlockCreation(port, _triggeredByTransaction = true) {
@@ -599,8 +536,7 @@ class P2pserver {
       const proposerObject = this.blockchain.getProposer()
       const inflightBlocks = this.transactionPool.getInflightBlocks()
       const isProposer = proposerObject.proposer === this.wallet.getPublicKey()
-      const canCreateBlock =
-        isProposer && readyToPropose && inflightBlocks.length <= 4
+      const canCreateBlock = isProposer && readyToPropose && inflightBlocks.length <= 8
 
       logger.log(
         P2P_PORT,

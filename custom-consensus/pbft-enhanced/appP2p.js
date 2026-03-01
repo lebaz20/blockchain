@@ -14,6 +14,7 @@ const CommitPool = require('./services/pools/commit')
 const PreparePool = require('./services/pools/prepare')
 const MessagePool = require('./services/pools/message')
 const MESSAGE_TYPE = require('./constants/message')
+const ChainUtility = require('./utils/chain')
 
 const HTTP_PORT = process.env.HTTP_PORT || 3001
 const P2P_PORT = process.env.P2P_PORT || 5001
@@ -72,11 +73,9 @@ app.get('/health', (request, response) => {
 
 // creates transactions for the sent data
 app.post('/transaction', async (request, response) => {
-  const { IS_FAULTY, REDIRECT_TO_URL, SHOULD_REDIRECT_FROM_FAULTY_NODES } =
-    config.get()
+  const { IS_FAULTY, REDIRECT_TO_URL, SHOULD_REDIRECT_FROM_FAULTY_NODES } = config.get()
   const unassignedTransactions = transactionPool.transactions.unassigned
-  const hasUnassignedTransactions =
-    unassignedTransactions && unassignedTransactions.length > 0
+  const hasUnassignedTransactions = unassignedTransactions && unassignedTransactions.length > 0
   if (
     !IS_FAULTY &&
     SHOULD_REDIRECT_FROM_FAULTY_NODES &&
@@ -91,9 +90,7 @@ app.post('/transaction', async (request, response) => {
           message: {
             transactions: hasUnassignedTransactions
               ? [
-                  ...unassignedTransactions.map(
-                    (transaction) => transaction.input.data
-                  ),
+                  ...unassignedTransactions.map((transaction) => transaction.input.data),
                   request.body
                 ]
               : request.body
@@ -117,9 +114,7 @@ app.post('/transaction', async (request, response) => {
       .status(lastError?.response?.status || 500)
       .send(lastError?.message || 'All redirects failed')
   } else {
-    const data = request.body.transactions
-      ? request.body.transactions
-      : [request.body]
+    const data = request.body.transactions ? request.body.transactions : [request.body]
     data.forEach((item) => {
       logger.log(`Processing transaction on ${HTTP_PORT}`, JSON.stringify(item))
       const transaction = wallet.createTransaction(item)
@@ -132,16 +127,21 @@ app.post('/transaction', async (request, response) => {
       p2pserver.broadcastTransaction(P2P_PORT, transaction)
 
       /**
-       * Simulate block verification by random shards
-       * We need then to mark faulty shards and exclude them from the network activities
+       * Simulate dual-shard verification: the same transaction is re-submitted
+       * with a new ID so the pool accepts it as a distinct entry (the signature
+       * covers the input hash, not the ID, so it remains valid). This models a
+       * RapidChain-style scenario where a second shard also validates the block.
+       * Deferred to next event loop tick so the HTTP response is sent first.
        */
-      const duplicateTransaction = wallet.createTransaction(item)
-      p2pserver.parseMessage({
-        type: MESSAGE_TYPE.transaction,
-        transaction: duplicateTransaction,
-        port: P2P_PORT
-      })
-      p2pserver.broadcastTransaction(P2P_PORT, duplicateTransaction)
+      // setTimeout(() => {
+        const duplicateTransaction = { ...transaction, id: ChainUtility.id() }
+        p2pserver.parseMessage({
+          type: MESSAGE_TYPE.transaction,
+          transaction: duplicateTransaction,
+          port: P2P_PORT
+        })
+        p2pserver.broadcastTransaction(P2P_PORT, duplicateTransaction)
+      // }, 0)
     })
     response.redirect('/stats')
   }

@@ -10,9 +10,7 @@ console.log = function (...arguments_) {
 }
 
 console.error = function (...arguments_) {
-  logStream.write(
-    `[ERROR ${new Date().toISOString()}] ${arguments_.join(' ')}\n`
-  )
+  logStream.write(`[ERROR ${new Date().toISOString()}] ${arguments_.join(' ')}\n`)
   process.stderr.write(`[ERROR] ${arguments_.join(' ')}\n`)
 }
 
@@ -50,10 +48,7 @@ const splitIntoShardsWithRemaining = (array) => {
   }
 
   // Last group with remaining nodes
-  result[result.length - 1] = [
-    ...result[result.length - 1],
-    ...array.slice(index)
-  ]
+  result[result.length - 1] = [...result[result.length - 1], ...array.slice(index)]
 
   return result
 }
@@ -61,10 +56,7 @@ const splitIntoShardsWithRemaining = (array) => {
 const getRandomIndicesArrays = (array) => {
   const indices = Array.from({ length: array.length }, (_, index) => index)
   const shuffledArray = shuffleArray(indices)
-  const faultyNodes = shuffleArray(shuffledArray).slice(
-    0,
-    NUMBER_OF_FAULTY_NODES
-  )
+  const faultyNodes = shuffleArray(shuffledArray).slice(0, NUMBER_OF_FAULTY_NODES)
   return {
     shards: splitIntoShardsWithRemaining(shuffledArray),
     faultyNodes
@@ -130,7 +122,7 @@ environmentArray.sort((a, b) => a.HTTP_PORT - b.HTTP_PORT)
 
 fs.writeFileSync(environmentFile, yaml.dump(environmentArray))
 
-const memory = '64Mi'
+const memory = '128Mi'
 const cpu = `${Number(CPU_LIMIT) * 1000}m`
 const k8sConfig = {
   apiVersion: 'v1',
@@ -193,9 +185,7 @@ const k8sConfig = {
             {
               name: environmentVariables.P2P_PORT.toString(),
               protocol: 'TCP',
-              port: environmentVariables.P2P_PORT
-                ? Number(environmentVariables.P2P_PORT)
-                : 5001,
+              port: environmentVariables.P2P_PORT ? Number(environmentVariables.P2P_PORT) : 5001,
               targetPort: environmentVariables.P2P_PORT
                 ? Number(environmentVariables.P2P_PORT)
                 : 5001
@@ -203,9 +193,7 @@ const k8sConfig = {
             {
               name: environmentVariables.HTTP_PORT.toString(),
               protocol: 'TCP',
-              port: environmentVariables.HTTP_PORT
-                ? Number(environmentVariables.HTTP_PORT)
-                : 3001,
+              port: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001,
               targetPort: environmentVariables.HTTP_PORT
                 ? Number(environmentVariables.HTTP_PORT)
                 : 3001

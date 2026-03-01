@@ -56,7 +56,13 @@ ENHANCED_SUMMARY=$(ls -t performance-results/*-summary.txt | head -1)
 cd ..
 
 echo -e "\n${GREEN}✓ PBFT-Enhanced test completed${NC}\n"
-sleep 5
+# Clean up between tests: kill all port-forwards and delete pods so ports 3001-3016
+# are fully released before RapidChain tries to bind the same range
+echo -e "${YELLOW}Cleaning up between tests (releasing ports 3001-3016)...${NC}"
+pkill -f "kubectl port-forward" 2>/dev/null || true
+kubectl delete pods,services --all --ignore-not-found=true 2>/dev/null || true
+sleep 15
+echo -e "${GREEN}✓ Cleanup complete${NC}\n"
 
 # Test 2: PBFT-RapidChain
 echo -e "${CYAN}========================================${NC}"
@@ -83,7 +89,7 @@ echo -e "${CYAN}========================================${NC}\n"
     echo ""
     echo "## Test Configuration"
     echo ""
-    echo "- **Number of Nodes:** 4"
+    echo "- **Number of Nodes (Enhanced):** ${ENHANCED_NODES:-16}"
     echo "- **JMeter Threads:** 10"
     echo "- **Test Duration:** 60 seconds"
     echo "- **Ramp-up Time:** 5 seconds"
@@ -171,12 +177,27 @@ echo -e "${CYAN}========================================${NC}\n"
     # Avg TX per Block
     ENH_AVG=$(extract_metric "pbft-enhanced/$ENHANCED_STATS" "Avg Transactions per Block")
     RC_AVG=$(extract_metric "pbft-rapidchain/$RAPIDCHAIN_STATS" "Avg Transactions per Block")
-    if (( $(echo "$ENH_AVG > $RC_AVG" | bc -l) )); then
+    if (( $(echo "${ENH_AVG:-0} > ${RC_AVG:-0}" | bc -l) )); then
         AVG_WINNER="**Enhanced** 🏆"
     else
         AVG_WINNER="**RapidChain** 🏆"
     fi
     echo "| Avg TX per Block | $ENH_AVG | $RC_AVG | $AVG_WINNER |"
+    
+    # Blockchain TX Rate (tx/s) — measured over full test+drain window
+    ENH_BRATE=$(extract_metric "pbft-enhanced/$ENHANCED_STATS" "Blockchain TX Rate (tx/s)")
+    RC_BRATE=$(extract_metric "pbft-rapidchain/$RAPIDCHAIN_STATS" "Blockchain TX Rate (tx/s)")
+    ENH_ELAPSED=$(extract_metric "pbft-enhanced/$ENHANCED_STATS" "Total Test Elapsed (s)")
+    RC_ELAPSED=$(extract_metric "pbft-rapidchain/$RAPIDCHAIN_STATS" "Total Test Elapsed (s)")
+    if [ -n "$ENH_BRATE" ] && [ -n "$RC_BRATE" ]; then
+        if (( $(echo "${ENH_BRATE:-0} > ${RC_BRATE:-0}" | bc -l) )); then
+            BRATE_WINNER="**Enhanced** 🏆"
+        else
+            BRATE_WINNER="**RapidChain** 🏆"
+        fi
+        echo "| Blockchain TX Rate (tx/s) | $ENH_BRATE | $RC_BRATE | $BRATE_WINNER |"
+        echo "| Total Test Elapsed (s) | ${ENH_ELAPSED:-N/A} | ${RC_ELAPSED:-N/A} | _(lower = faster drain)_ |"
+    fi
     
     echo ""
     echo "---"

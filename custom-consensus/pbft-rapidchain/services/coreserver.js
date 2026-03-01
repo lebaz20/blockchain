@@ -14,6 +14,8 @@ class Coreserver {
     this.rates = {}
     this.idaGossip = idaGossip
     this.config = config.get()
+    // Map of subsetIndex -> { block, subsetIndex } for shard blocks forwarded to committee
+    this.pendingShardBlocks = {}
   }
 
   // Creates a server on a given port
@@ -50,6 +52,8 @@ class Coreserver {
 
   // send block to committee shard
   sendBlockToCommitteeShard(block, subsetIndex) {
+    // Store pending shard block so we can broadcast it back once committee confirms it
+    this.pendingShardBlocks[subsetIndex] = { block, subsetIndex }
     this.idaGossip.sendFromCoreToSpecificShard({
       message: {
         type: MESSAGE_TYPE.block_from_core,
@@ -212,12 +216,24 @@ class Coreserver {
                   rate: this.rates
                 }
                 logger.log(`CORE TOTAL:`, JSON.stringify(stats))
+                // Each committee transaction wraps a shard block:
+                // transaction.input.data = { data: originalBlock.data, subsetIndex: originalSubsetIndex }
+                // Look up the original shard block from pendingShardBlocks and broadcast it
                 data.block.data.forEach((transaction) => {
                   logger.log(`COMMITTEE BLOCK TRANSACTION:`, JSON.stringify(transaction))
-                  this.broadcastBlock(
-                    this.blockchain.committeeChain[transaction.hash],
-                    data.subsetIndex
-                  )
+                  const originalSubsetIndex = transaction?.input?.data?.subsetIndex
+                  const pending = this.pendingShardBlocks[originalSubsetIndex]
+                  if (pending) {
+                    logger.log(`BROADCASTING SHARD BLOCK FOR SUBSET:`, originalSubsetIndex)
+                    this.broadcastBlock(pending.block, pending.subsetIndex)
+                    delete this.pendingShardBlocks[originalSubsetIndex]
+                  } else {
+                    logger.error(
+                      `NO PENDING SHARD BLOCK FOR SUBSET:`,
+                      originalSubsetIndex,
+                      `(available: ${Object.keys(this.pendingShardBlocks)})`
+                    )
+                  }
                 })
               }
             }

@@ -10,9 +10,7 @@ console.log = function (...arguments_) {
 }
 
 console.error = function (...arguments_) {
-  logStream.write(
-    `[ERROR ${new Date().toISOString()}] ${arguments_.join(' ')}\n`
-  )
+  logStream.write(`[ERROR ${new Date().toISOString()}] ${arguments_.join(' ')}\n`)
   process.stderr.write(`[ERROR] ${arguments_.join(' ')}\n`)
 }
 
@@ -27,8 +25,7 @@ const NUMBER_OF_FAULTY_NODES = Number(process.env.NUMBER_OF_FAULTY_NODES)
 const NUMBER_OF_NODES_PER_SHARD = Number(process.env.NUMBER_OF_NODES_PER_SHARD)
 const DEFAULT_TTL = Number(process.env.DEFAULT_TTL) || 6
 const CPU_LIMIT = Number(process.env.CPU_LIMIT)
-const HAS_COMMITTEE_SHARD =
-  Number(process.env.HAS_COMMITTEE_SHARD) === 1 ? 'true' : 'false'
+const HAS_COMMITTEE_SHARD = Number(process.env.HAS_COMMITTEE_SHARD) === 1 ? 'true' : 'false'
 const SHOULD_REDIRECT_FROM_FAULTY_NODES =
   Number(process.env.SHOULD_REDIRECT_FROM_FAULTY_NODES) === 1 ? 'true' : 'false'
 
@@ -53,10 +50,7 @@ const splitIntoShardsWithRemaining = (array) => {
   }
 
   // Last group with remaining nodes
-  result[result.length - 1] = [
-    ...result[result.length - 1],
-    ...array.slice(index)
-  ]
+  result[result.length - 1] = [...result[result.length - 1], ...array.slice(index)]
 
   return result
 }
@@ -64,14 +58,12 @@ const splitIntoShardsWithRemaining = (array) => {
 const getRandomIndicesArrays = (array) => {
   const indices = Array.from({ length: array.length }, (_, index) => index)
   const shuffledArray = shuffleArray(indices)
-  const faultyNodes = shuffleArray(shuffledArray).slice(
-    0,
-    NUMBER_OF_FAULTY_NODES
-  )
+  const faultyNodes = shuffleArray(shuffledArray).slice(0, NUMBER_OF_FAULTY_NODES)
   const committeeShard = HAS_COMMITTEE_SHARD
-    ? shuffleArray(
-        shuffledArray.filter((_, index) => !faultyNodes.includes(index))
-      ).slice(0, NUMBER_OF_NODES_PER_SHARD)
+    ? shuffleArray(shuffledArray.filter((_, index) => !faultyNodes.includes(index))).slice(
+        0,
+        NUMBER_OF_NODES_PER_SHARD
+      )
     : []
   return {
     shards: splitIntoShardsWithRemaining(shuffledArray),
@@ -84,9 +76,7 @@ const {
   shards: nodesSubsets,
   faultyNodes,
   committeeShard: committeeSubset
-} = getRandomIndicesArrays(
-  Array.from({ length: NUMBER_OF_NODES }, (_, index) => index)
-)
+} = getRandomIndicesArrays(Array.from({ length: NUMBER_OF_NODES }, (_, index) => index))
 console.log(nodesSubsets, faultyNodes)
 const environmentArray = []
 // Save environmentVariables to a yml file
@@ -138,10 +128,7 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
         }
       })
       if (committeePeersSubset.length > 0 && committeeSubset.includes(index)) {
-        console.log(
-          `COMMITTEE Peers for ${5001 + index}: `,
-          committeePeersSubset
-        )
+        console.log(`COMMITTEE Peers for ${5001 + index}: `, committeePeersSubset)
         environmentVariables.COMMITTEE_PEERS = committeePeersSubset.join(',')
         environmentVariables.COMMITTEE_SUBSET = JSON.stringify(committeeSubset)
       }
@@ -161,7 +148,7 @@ environmentArray.sort((a, b) => a.HTTP_PORT - b.HTTP_PORT)
 
 fs.writeFileSync(environmentFile, yaml.dump(environmentArray))
 
-const memory = '64Mi'
+const memory = '128Mi'
 const cpu = `${Number(CPU_LIMIT) * 1000}m`
 const k8sConfig = {
   apiVersion: 'v1',
@@ -224,9 +211,7 @@ const k8sConfig = {
             {
               name: environmentVariables.P2P_PORT.toString(),
               protocol: 'TCP',
-              port: environmentVariables.P2P_PORT
-                ? Number(environmentVariables.P2P_PORT)
-                : 5001,
+              port: environmentVariables.P2P_PORT ? Number(environmentVariables.P2P_PORT) : 5001,
               targetPort: environmentVariables.P2P_PORT
                 ? Number(environmentVariables.P2P_PORT)
                 : 5001
@@ -234,9 +219,7 @@ const k8sConfig = {
             {
               name: environmentVariables.HTTP_PORT.toString(),
               protocol: 'TCP',
-              port: environmentVariables.HTTP_PORT
-                ? Number(environmentVariables.HTTP_PORT)
-                : 3001,
+              port: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001,
               targetPort: environmentVariables.HTTP_PORT
                 ? Number(environmentVariables.HTTP_PORT)
                 : 3001

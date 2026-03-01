@@ -13,6 +13,11 @@ jest.mock('../config', () => ({
   })
 }))
 
+// Mock cpu utils to avoid cgroup file dependency and prevent background timer
+jest.mock('../utils/cpu', () => ({
+  readCgroupCPUPercentPromise: jest.fn().mockResolvedValue(50)
+}))
+
 // Mock logger
 jest.mock('../utils/logger', () => ({
   log: jest.fn(),
@@ -36,6 +41,10 @@ describe('Blockchain', () => {
       removeDuplicates: jest.fn()
     }
     blockchain = new Blockchain(validators, mockTransactionPool)
+  })
+
+  afterEach(() => {
+    blockchain.stopCpuCacheUpdater()
   })
 
   describe('constructor', () => {

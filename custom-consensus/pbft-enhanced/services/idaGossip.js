@@ -136,16 +136,19 @@ class IDAGossip {
   }
 
   sendSocketMessage(socket, data) {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       // Check if socket is open before sending
       if (!socket || socket.readyState !== 1) {
-        // WebSocket.OPEN = 1
-        reject(new Error('WebSocket is not open'))
+        // WebSocket.OPEN = 1 — peer disconnected, skip silently
+        resolve()
         return
       }
       socket.send(data, (error) => {
-        if (error) reject(error)
-        else resolve()
+        if (error) {
+          // EPIPE / send errors are expected in gossip when peers disconnect mid-send
+          console.warn('WebSocket send error (peer likely disconnected):', error.message)
+        }
+        resolve()
       })
     })
   }
@@ -163,7 +166,9 @@ class IDAGossip {
         peers = [this.getSocketGossipCore(socketsKey)]
       } else {
         try {
-          peers = isEmpty(targetsSubset) ? this.getSocketGossipPeers(sendersSubset, socketsKey) : targetsSubset
+          peers = isEmpty(targetsSubset)
+            ? this.getSocketGossipPeers(sendersSubset, socketsKey)
+            : targetsSubset
         } catch (error) {
           console.error('Error getting peers for gossip:', error, message)
           throw error
@@ -182,13 +187,14 @@ class IDAGossip {
           method: 'post',
           url: peer,
           data: messageToSend
+        }).catch((error) => {
+          console.warn('HTTP gossip send error (peer likely unavailable):', error.message)
         })
       } else {
-        console.log('Sending chunk to peer via WebSocket:', peer.url || peer._socket.remoteAddress) 
         return this.sendSocketMessage(peer, JSON.stringify(messageToSend))
       }
     })
-    return Promise.all(requests)
+    return Promise.allSettled(requests)
   }
 
   calculateTTL(numberNodes) {
@@ -341,7 +347,10 @@ class IDAGossip {
       )
 
       // Verify file integrity
-      const reconstructedHash = nodeCrypto.createHash('sha256').update(reconstructedBuffer).digest('hex')
+      const reconstructedHash = nodeCrypto
+        .createHash('sha256')
+        .update(reconstructedBuffer)
+        .digest('hex')
 
       if (reconstructedHash === fileHash) {
         const jsonString = reconstructedBuffer.toString('utf8')
