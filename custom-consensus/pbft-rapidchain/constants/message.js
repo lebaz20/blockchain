@@ -5,6 +5,7 @@ const MESSAGE_TYPE = {
   pre_prepare: 'PRE-PREPARE',
   commit: 'COMMIT',
   round_change: 'ROUND_CHANGE',
+  view_change: 'VIEW_CHANGE',
   block_to_core: 'BLOCK_TO_CORE',
   committee_block_to_core: 'COMMITTEE_BLOCK_TO_CORE',
   block_from_core: 'BLOCK_FROM_CORE',

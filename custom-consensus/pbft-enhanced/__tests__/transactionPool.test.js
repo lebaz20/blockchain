@@ -138,7 +138,7 @@ describe('TransactionPool', () => {
       expect(transactionPool.transactions.unassigned.length).toBe(0)
 
       // Fast forward 2 minutes
-      jest.advanceTimersByTime(2 * 60 * 1000)
+      jest.advanceTimersByTime(3 * 60 * 1000)
 
       expect(transactionPool.transactions.unassigned.length).toBe(1)
       expect(transactionPool.transactions['block-hash']).toBeUndefined()
@@ -155,7 +155,7 @@ describe('TransactionPool', () => {
       transactionPool.assignTransactions(block)
       transactionPool.clear('block-hash', [tx])
 
-      jest.advanceTimersByTime(2 * 60 * 1000)
+      jest.advanceTimersByTime(3 * 60 * 1000)
 
       expect(transactionPool.transactions.unassigned.length).toBe(0)
     })
@@ -173,7 +173,7 @@ describe('TransactionPool', () => {
       // Add the same transaction again
       transactionPool.addTransaction(tx)
 
-      jest.advanceTimersByTime(2 * 60 * 1000)
+      jest.advanceTimersByTime(3 * 60 * 1000)
 
       expect(transactionPool.transactions.unassigned.length).toBe(1)
     })

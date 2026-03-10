@@ -14,19 +14,26 @@ const CPU_OVER_UTILIZED_THRESHOLD = 70
 const RateUtility = require('../utils/rate')
 const { readCgroupCPUPercentPromise } = require('../utils/cpu')
 const { SHARD_STATUS } = require('../constants/status')
-const { NODES_SUBSET, NUMBER_OF_NODES_PER_SHARD, SUBSET_INDEX, IS_FAULTY, MIN_APPROVALS } =
-  config.get()
+const { NODES_SUBSET, SUBSET_INDEX, IS_FAULTY, MIN_APPROVALS, COMMITTEE_SUBSET } = config.get()
 
 const CPU_CACHE_INTERVAL_MS = 5000
 
 class Blockchain {
-  constructor(validators, transactionPool, isCore = false) {
+  // committeeValidators is optional; when provided its .list is used for committee
+  // proposer selection so cross-shard committee messages are routed to the right node.
+  constructor(validators, transactionPool, isCore = false, committeeValidators = null) {
     if (!isCore) {
       this.validatorList = validators.generateAddresses(NODES_SUBSET)
+      // Build committee validator list from the passed-in committeeValidators instance,
+      // falling back to the shard validator list if no committee validators are provided.
+      this.committeeValidatorList = committeeValidators?.list ?? this.validatorList
       this.transactionPool = transactionPool
       this.chain = {
         [SUBSET_INDEX]: [Block.genesis()]
       }
+      // Shard nodes that are also committee members need committeeChain so that
+      // getProposer / isValidBlock / addBlock work correctly for committee consensus.
+      this.committeeChain = [Block.genesis()]
     } else {
       this.chain = {}
       this.committeeChain = [Block.genesis()]
@@ -85,42 +92,50 @@ class Blockchain {
     }
   }
 
-  createBlock(transactions, wallet, previousBlock = undefined) {
-    const block = Block.createBlock(
-      previousBlock ?? this.chain[SUBSET_INDEX][this.chain[SUBSET_INDEX].length - 1],
-      transactions,
-      wallet
-    )
+  createBlock(transactions, wallet, previousBlock = undefined, isCommittee = false) {
+    const chainLastBlock = isCommittee
+      ? this.committeeChain[this.committeeChain.length - 1]
+      : this.chain[SUBSET_INDEX][this.chain[SUBSET_INDEX].length - 1]
+    const block = Block.createBlock(previousBlock ?? chainLastBlock, transactions, wallet)
     return block
   }
 
-  getProposer(blocksCount = undefined, isCommittee = false) {
-    const chain = isCommittee ? this.committeeChain : this.chain
-    const currentChainLength = chain[SUBSET_INDEX].length
+  getProposer(blocksCount = undefined, isCommittee = false, viewOffset = 0) {
+    // committeeChain is a plain array; this.chain is keyed by SUBSET_INDEX.
+    // Use the array directly to avoid chain[SUBSET_INDEX] returning undefined.
+    const chainArray = isCommittee ? this.committeeChain : this.chain[SUBSET_INDEX]
+    // For committee, use the dedicated committee validator list and subset.
+    const validatorList =
+      isCommittee && this.committeeValidatorList ? this.committeeValidatorList : this.validatorList
+    const nodeSubset = isCommittee && COMMITTEE_SUBSET.length > 0 ? COMMITTEE_SUBSET : NODES_SUBSET
+
+    const currentChainLength = chainArray.length
     let blockIndex = (blocksCount ?? currentChainLength) - 1
-    if (!chain[SUBSET_INDEX][blockIndex]?.hash) {
+    if (!chainArray[blockIndex]?.hash) {
       blockIndex = currentChainLength - 1
     }
 
     const currentMinute = new Date().getMinutes()
-    const hashCharCode = chain[SUBSET_INDEX][blockIndex].hash[HASH_FIRST_CHAR_INDEX].charCodeAt(0)
-    const proposerRotationModulo = NUMBER_OF_NODES_PER_SHARD
-    const index = (hashCharCode + currentMinute) % proposerRotationModulo
+    const hashCharCode = chainArray[blockIndex].hash[HASH_FIRST_CHAR_INDEX].charCodeAt(0)
+    const proposerRotationModulo = validatorList.length
+    const index = (hashCharCode + currentMinute + viewOffset) % proposerRotationModulo
     return {
-      proposer: this.validatorList[index],
-      proposerIndex: NODES_SUBSET[index]
+      proposer: validatorList[index],
+      proposerIndex: nodeSubset[index]
     }
   }
 
-  isValidBlock(block, blocksCount, previousBlock = undefined, isCommittee = false) {
-    const chain = isCommittee ? this.committeeChain : this.chain
-    const lastBlock = previousBlock ?? chain[SUBSET_INDEX][chain[SUBSET_INDEX].length - 1]
+  // eslint-disable-next-line max-params
+  isValidBlock(block, blocksCount, previousBlock = undefined, isCommittee = false, viewOffset = 0) {
+    // committeeChain is a plain array; this.chain is keyed by SUBSET_INDEX.
+    const chainArray = isCommittee ? this.committeeChain : this.chain[SUBSET_INDEX]
+    const lastBlock = previousBlock ?? chainArray[chainArray.length - 1]
     if (
       lastBlock.sequenceNo + 1 === block.sequenceNo &&
       block.lastHash === lastBlock.hash &&
       block.hash === Block.blockHash(block) &&
       Block.verifyBlock(block) &&
-      Block.verifyProposer(block, this.getProposer(blocksCount, isCommittee).proposer)
+      Block.verifyProposer(block, this.getProposer(blocksCount, isCommittee, viewOffset).proposer)
     ) {
       logger.log('BLOCK VALID')
       return true
@@ -130,7 +145,7 @@ class Blockchain {
         block.lastHash === lastBlock.hash,
         block.hash === Block.blockHash(block),
         Block.verifyBlock(block),
-        Block.verifyProposer(block, this.getProposer(blocksCount, isCommittee).proposer)
+        Block.verifyProposer(block, this.getProposer(blocksCount, isCommittee, viewOffset).proposer)
       )
       logger.error('BLOCK INVALID')
       return false
@@ -189,13 +204,24 @@ class Blockchain {
   getTotal() {
     const total = {}
     Object.keys(this.chain).forEach((subsetIndex) => {
-      const actualBlocksCount = this.chain[subsetIndex].length
+      // Subtract 1 to exclude the genesis block (always present, always has 0 transactions)
+      const actualBlocksCount = Math.max(0, this.chain[subsetIndex].length - 1)
       total[subsetIndex] = {
         blocks: actualBlocksCount,
-        transactions: this.chain[subsetIndex].reduce((sum, block) => sum + block.data.length, 0),
-        unassignedTransactions: this.transactionPool?.transactions.unassigned.length
+        transactions: this.chain[subsetIndex]
+          .slice(1)
+          .reduce((sum, block) => sum + block.data.length, 0),
+        // Only this node's own pool is visible to it; report 0 for foreign shards
+        // so the stats collection script does not multiply the pool size by shard count.
+        unassignedTransactions:
+          subsetIndex === SUBSET_INDEX
+            ? (this.transactionPool?.transactions.unassigned.length ?? 0)
+            : 0
       }
     })
+    // Committee chain is intentionally excluded: its blocks contain the same
+    // transactions already committed in shard chains (re-wrapped for cross-shard
+    // finality), so including them would double-count every transaction.
     return total
   }
 

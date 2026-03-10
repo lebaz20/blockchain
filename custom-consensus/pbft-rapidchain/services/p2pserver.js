@@ -14,7 +14,8 @@ const {
   IS_FAULTY,
   CORE,
   PEERS,
-  COMMITTEE_PEERS
+  COMMITTEE_PEERS,
+  COMMITTEE_SUBSET
 } = config.get()
 
 const P2P_PORT = process.env.P2P_PORT || 5001
@@ -30,7 +31,8 @@ class P2pserver {
     commitPool,
     messagePool,
     validators,
-    idaGossip
+    idaGossip,
+    committeeValidators
   ) {
     this.sockets = {
       peers: {},
@@ -48,9 +50,23 @@ class P2pserver {
     this.commitPool = commitPool
     this.messagePool = messagePool
     this.validators = validators
+    // Committee validators are based on COMMITTEE_SUBSET (all committee node indices).
+    // Using shard validators for committee messages causes cross-shard committee
+    // transactions to be rejected (shard A rejects keys from shard B committee members).
+    this.committeeValidators = committeeValidators || validators
     this.lastTransactionCreatedAt = undefined
     this.lastCommitteeTransactionCreatedAt = undefined
     this.idaGossip = idaGossip
+    // View-change: incremented each time the designated proposer fails to act
+    this._viewOffset = 0
+    this._committeeViewOffset = 0
+    this._inactivityViewRotated = false
+    this._committeeInactivityViewRotated = false
+    this._poolWasFullThisEpoch = false
+    this._committeePoolWasFullThisEpoch = false
+    // Vote pools for atomic view-change: targetView → Set<publicKey>.
+    this._viewChangeVotes = new Map()
+    this._committeeViewChangeVotes = new Map()
   }
 
   listen() {
@@ -67,9 +83,18 @@ class P2pserver {
     })
     this.connectToPeers()
     this.connectToCore(false)
+    // Determine committee membership from COMMITTEE_SUBSET (not just COMMITTEE_PEERS).
+    // The lowest-indexed committee member has no lower-indexed peers so COMMITTEE_PEERS=[],
+    // but it still needs to register with the core as a committee member so the core
+    // includes it in committee block broadcasts.
+    const currentNodeIndex = Number(P2P_PORT) - 5001
+    const isCommitteeMember =
+      COMMITTEE_SUBSET.length > 0 && COMMITTEE_SUBSET.includes(currentNodeIndex)
+    if (isCommitteeMember) {
+      this.connectToCore(true)
+    }
     if (COMMITTEE_PEERS.length > 0) {
       this.connectToCommitteePeers()
-      this.connectToCore(true)
     }
 
     setInterval(async () => {
@@ -235,7 +260,8 @@ class P2pserver {
     block,
     blocksCount,
     previousBlock = undefined,
-    isCommittee = false
+    isCommittee = false,
+    viewOffset = 0
   ) {
     this.idaGossip.sendToShardPeers({
       message: {
@@ -244,12 +270,14 @@ class P2pserver {
         data: {
           block,
           previousBlock,
-          blocksCount
+          blocksCount,
+          viewOffset
         }
       },
       chunkKey: 'data',
       socketsKey: isCommittee ? 'committeePeers' : 'peers',
-      senderPort
+      senderPort,
+      consensusMessage: true
     })
   }
 
@@ -263,7 +291,8 @@ class P2pserver {
       },
       chunkKey: 'prepare',
       socketsKey: isCommittee ? 'committeePeers' : 'peers',
-      senderPort
+      senderPort,
+      consensusMessage: true
     })
   }
 
@@ -277,7 +306,8 @@ class P2pserver {
       },
       chunkKey: 'commit',
       socketsKey: isCommittee ? 'committeePeers' : 'peers',
-      senderPort
+      senderPort,
+      consensusMessage: true
     })
   }
 
@@ -287,11 +317,31 @@ class P2pserver {
       message: {
         type: MESSAGE_TYPE.round_change,
         port: P2P_PORT,
-        message
+        message,
+        isCommittee
       },
       chunkKey: 'message',
       socketsKey: isCommittee ? 'committeePeers' : 'peers',
-      senderPort
+      senderPort,
+      consensusMessage: true
+    })
+  }
+
+  // broadcasts a view-change vote — sent by non-proposer nodes on inactivity;
+  // _viewOffset only advances once MIN_APPROVALS votes are collected so all
+  // shard nodes rotate atomically to the same view.
+  broadcastViewChange(senderPort, viewChange, isCommittee = false) {
+    this.idaGossip.sendToShardPeers({
+      message: {
+        type: MESSAGE_TYPE.view_change,
+        port: P2P_PORT,
+        viewChange,
+        isCommittee
+      },
+      chunkKey: 'viewChange',
+      socketsKey: isCommittee ? 'committeePeers' : 'peers',
+      senderPort,
+      consensusMessage: true
     })
   }
 
@@ -338,8 +388,19 @@ class P2pserver {
   }
 
   _scheduleTimeoutBlockCreation(isCommittee) {
-    clearTimeout(this._blockCreationTimeout)
+    // Don't reset the timer when the pool is already full — it is being used to
+    // detect a silent/faulty proposer. Resetting it on every incoming transaction
+    // would prevent it from ever firing under sustained load.
+    const poolFull = this.transactionPool.poolFull(isCommittee)
+    if (!poolFull) {
+      clearTimeout(this._blockCreationTimeout)
+    } else if (this._blockCreationTimeout) {
+      return // already counting down — keep the existing deadline
+    }
     this._blockCreationTimeout = setTimeout(() => {
+      // Null the reference immediately so _scheduleTimeoutBlockCreation called from
+      // within this callback knows no countdown is active and can schedule a new one.
+      this._blockCreationTimeout = null
       const now = new Date()
       const lastTransactionTime = isCommittee
         ? this.lastCommitteeTransactionCreatedAt
@@ -347,7 +408,8 @@ class P2pserver {
       const unassignedCount = isCommittee
         ? this.transactionPool.committeeTransactions.unassigned.length
         : this.transactionPool.transactions.unassigned.length
-      const proposerObject = this.blockchain.getProposer(undefined, isCommittee)
+      const currentViewOffset = isCommittee ? this._committeeViewOffset : this._viewOffset
+      const proposerObject = this.blockchain.getProposer(undefined, isCommittee, currentViewOffset)
       const isProposer = proposerObject.proposer === this.wallet.getPublicKey()
 
       const isInactive =
@@ -415,8 +477,61 @@ class P2pserver {
         })
       }
 
-      if (isInactive && unassignedCount > 0) {
+      // Pool still full after timeout — proposer still silent.
+      // Vote via broadcast so all shard nodes rotate atomically.
+      // Map-level dedup prevents re-broadcasting a vote already cast this epoch.
+      if (unassignedCount >= TRANSACTION_THRESHOLD) {
+        if (!isProposer) {
+          // Only non-proposers vote — the proposer should be creating blocks,
+          // not voting to skip itself.
+          const poolFullFlag = isCommittee
+            ? '_committeePoolWasFullThisEpoch'
+            : '_poolWasFullThisEpoch'
+          const votesMap = isCommittee ? '_committeeViewChangeVotes' : '_viewChangeVotes'
+          const currentView = isCommittee ? this._committeeViewOffset : this._viewOffset
+          this[poolFullFlag] = true
+          const targetView = currentView + 1
+          if (!this[votesMap].has(targetView)) this[votesMap].set(targetView, new Set())
+          if (!this[votesMap].get(targetView).has(this.wallet.getPublicKey())) {
+            this[votesMap].get(targetView).add(this.wallet.getPublicKey())
+            logger.log(P2P_PORT, 'VIEW CHANGE VOTE (timeout) — proposing view', targetView)
+            this.broadcastViewChange(
+              P2P_PORT,
+              { targetView, publicKey: this.wallet.getPublicKey() },
+              isCommittee
+            )
+          }
+        }
         this.initiateBlockCreation(P2P_PORT, false, isCommittee)
+      } else if (isInactive && unassignedCount > 0) {
+        const rotatedFlag = isCommittee
+          ? '_committeeInactivityViewRotated'
+          : '_inactivityViewRotated'
+        const poolFullFlag = isCommittee
+          ? '_committeePoolWasFullThisEpoch'
+          : '_poolWasFullThisEpoch'
+        const votesMap = isCommittee ? this._committeeViewChangeVotes : this._viewChangeVotes
+        const currentOffset = isCommittee ? this._committeeViewOffset : this._viewOffset
+        if (!isProposer && !this[poolFullFlag] && !this[rotatedFlag]) {
+          this[rotatedFlag] = true
+          const targetView = currentOffset + 1
+          if (!votesMap.has(targetView)) votesMap.set(targetView, new Set())
+          votesMap.get(targetView).add(this.wallet.getPublicKey())
+          logger.log(P2P_PORT, 'VIEW CHANGE VOTE — proposing view', targetView)
+          this.broadcastViewChange(
+            P2P_PORT,
+            { targetView, publicKey: this.wallet.getPublicKey() },
+            isCommittee
+          )
+        }
+        // Sub-threshold drain: if this node is the proposer and ready, create a
+        // block with whatever TX are available.
+        if (isProposer && this._canProposeBlock(isCommittee)) {
+          this._createAndBroadcastBlock(P2P_PORT, currentOffset, isCommittee)
+        } else {
+          // Keep trying with the current offset while waiting for quorum
+          this.initiateBlockCreation(P2P_PORT, false, isCommittee)
+        }
       }
     }, TIMEOUTS.BLOCK_CREATION_TIMEOUT_MS)
   }
@@ -432,7 +547,7 @@ class P2pserver {
     return true
   }
 
-  _createAndBroadcastBlock(port, isCommittee) {
+  _createAndBroadcastBlock(port, isCommittee, viewOffset = 0) {
     const blocksPool = isCommittee ? this.blockPool.committeeBlocks : this.blockPool.blocks
     const lastUnpersistedBlock = blocksPool[blocksPool.length - 1]
     const inflightBlocks = this.transactionPool.getInflightBlocks(undefined, isCommittee)
@@ -443,31 +558,38 @@ class P2pserver {
 
     const previousBlock = inflightBlocks.length > 1 ? lastUnpersistedBlock : undefined
     const transactionsBatch = unassignedTransactions.splice(0, threshold)
-    const block = this.blockchain.createBlock(transactionsBatch, this.wallet, previousBlock)
-
-    logger.log(
-      P2P_PORT,
-      'CREATED BLOCK',
-      JSON.stringify({
-        lastHash: block.lastHash,
-        hash: block.hash,
-        data: block.data
-      })
+    const block = this.blockchain.createBlock(
+      transactionsBatch,
+      this.wallet,
+      previousBlock,
+      isCommittee
     )
+
+    logger.log(P2P_PORT, 'CREATED BLOCK', block.hash, 'txCount:', block.data.length)
 
     this.transactionPool.assignTransactions(block, isCommittee)
     const blocksCount = isCommittee
       ? this.blockchain.committeeChain.length
       : this.blockchain.chain[SUBSET_INDEX].length
 
-    this.broadcastPrePrepare(port, block, blocksCount, previousBlock, isCommittee)
+    // Proposer adds block to its own pool (needed for addUpdatedBlock look-up on commit)
+    this.blockPool.addBlock(block, isCommittee)
+    // Standard PBFT: the proposer implicitly casts a prepare for its own block.
+    // Broadcast it immediately so non-proposer nodes reach MIN_APPROVALS even when
+    // one shard peer is faulty (only 3 non-faulty nodes, all three must vote).
+    const ownPrepare = this.preparePool.prepare(block, this.wallet, isCommittee)
+    this.broadcastPrePrepare(port, block, blocksCount, previousBlock, isCommittee, viewOffset)
+    this.broadcastPrepare(port, ownPrepare, isCommittee)
   }
 
   initiateBlockCreation(port, _triggeredByTransaction = true, isCommittee = false) {
+    // Only update inactivity clock for real incoming transactions.
+    // Timeout-path calls (_triggeredByTransaction=false) must not reset the
+    // clock or isInactive will always be false during active JMeter load.
     if (isCommittee) {
-      this.lastCommitteeTransactionCreatedAt = new Date()
+      if (_triggeredByTransaction) this.lastCommitteeTransactionCreatedAt = new Date()
     } else {
-      this.lastTransactionCreatedAt = new Date()
+      if (_triggeredByTransaction) this.lastTransactionCreatedAt = new Date()
     }
     const thresholdReached = this.transactionPool.poolFull(isCommittee)
 
@@ -491,8 +613,9 @@ class P2pserver {
       : this.transactionPool.transactions.unassigned.length
     logger.log(P2P_PORT, 'THRESHOLD REACHED, TOTAL NOW:', unassignedCount)
 
+    const viewOffset = isCommittee ? this._committeeViewOffset : this._viewOffset
     const readyToPropose = this._canProposeBlock(isCommittee)
-    const proposerObject = this.blockchain.getProposer(undefined, isCommittee)
+    const proposerObject = this.blockchain.getProposer(undefined, isCommittee, viewOffset)
     const inflightBlocks = this.transactionPool.getInflightBlocks(undefined, isCommittee)
     const isProposer = proposerObject.proposer === this.wallet.getPublicKey()
     const canCreateBlock = isProposer && readyToPropose && inflightBlocks.length <= 4
@@ -513,32 +636,91 @@ class P2pserver {
 
     if (canCreateBlock) {
       logger.log(P2P_PORT, 'PROPOSING BLOCK')
-      this._createAndBroadcastBlock(port, isCommittee)
+      // We are the proposer — clear any pending view-change countdown
+      clearTimeout(this._blockCreationTimeout)
+      this._blockCreationTimeout = null
+      this._createAndBroadcastBlock(port, isCommittee, viewOffset)
     } else {
       const unassignedCount = isCommittee
         ? this.transactionPool.committeeTransactions.unassigned.length
         : this.transactionPool.transactions.unassigned.length
       logger.log(
         P2P_PORT,
-        'Transaction Threshold NOT REACHED, TOTAL UNASSIGNED NOW:',
+        'NOT PROPOSER, waiting for proposer or view change. TOTAL UNASSIGNED:',
         unassignedCount
       )
+      // Pool is full on a real incoming transaction and the elected proposer is not
+      // us — likely faulty/silent. Broadcast a vote immediately.
+      // Guard: _triggeredByTransaction=false means we were called from a view-change
+      // quorum or timeout handler; the new proposer just got elected and deserves a
+      // grace period before we vote to skip them.
+      // Note: _inactivityViewRotated intentionally NOT set here so it remains
+      // available as a fallback for sub-threshold drain rounds with faulty proposers.
+      const poolFullFlag = isCommittee ? '_committeePoolWasFullThisEpoch' : '_poolWasFullThisEpoch'
+      const rotatedFlag = isCommittee ? '_committeeInactivityViewRotated' : '_inactivityViewRotated'
+      // Check if the elected proposer is already a known-faulty peer.
+      // Vote to skip immediately rather than waiting 10 s for the timeout.
+      const proposerPort =
+        proposerObject.proposerIndex !== null ? String(5001 + proposerObject.proposerIndex) : null
+      const proposerKnownFaulty =
+        proposerPort !== null && this.sockets.peers[proposerPort]?.isFaulty === true
+      if (
+        !isProposer &&
+        thresholdReached &&
+        proposerKnownFaulty &&
+        !this[poolFullFlag] &&
+        !this[rotatedFlag]
+      ) {
+        const votesMap = isCommittee ? '_committeeViewChangeVotes' : '_viewChangeVotes'
+        this[poolFullFlag] = true
+        const targetView = viewOffset + 1
+        if (!this[votesMap].has(targetView)) this[votesMap].set(targetView, new Set())
+        this[votesMap].get(targetView).add(this.wallet.getPublicKey())
+        logger.log(
+          P2P_PORT,
+          'VIEW CHANGE VOTE (known-faulty proposer) — proposing view',
+          targetView
+        )
+        this.broadcastViewChange(
+          port,
+          { targetView, publicKey: this.wallet.getPublicKey() },
+          isCommittee
+        )
+      } else if (
+        _triggeredByTransaction &&
+        !isProposer &&
+        !this[poolFullFlag] &&
+        !this[rotatedFlag]
+      ) {
+        this[poolFullFlag] = true
+        const targetView = viewOffset + 1
+        const votesMap = isCommittee ? '_committeeViewChangeVotes' : '_viewChangeVotes'
+        if (!this[votesMap].has(targetView)) this[votesMap].set(targetView, new Set())
+        this[votesMap].get(targetView).add(this.wallet.getPublicKey())
+        logger.log(P2P_PORT, 'VIEW CHANGE VOTE (pool full) — proposing view', targetView)
+        this.broadcastViewChange(
+          port,
+          { targetView, publicKey: this.wallet.getPublicKey() },
+          isCommittee
+        )
+      }
     }
 
     this._scheduleTimeoutBlockCreation(isCommittee)
   }
 
   _handleTransaction(data, isCommittee) {
+    const activeValidators = isCommittee ? this.committeeValidators : this.validators
     if (
-      !this.transactionPool.transactionExists(data.transaction) &&
+      !this.transactionPool.transactionExists(data.transaction, isCommittee) &&
       this.transactionPool.verifyTransaction(data.transaction) &&
-      this.validators.isValidValidator(data.transaction.from)
+      activeValidators.isValidValidator(data.transaction.from)
     ) {
       if (data.port && data.port in this.sockets.peers) {
         this.sockets.peers[data.port].isFaulty = data.isFaulty
       }
       this.transactionPool.addTransaction(data.transaction, isCommittee)
-      logger.log(
+      logger.debug(
         P2P_PORT,
         'TRANSACTION ADDED, TOTAL NOW:',
         isCommittee
@@ -551,10 +733,17 @@ class P2pserver {
   }
 
   _handlePrePrepare(data, isCommittee) {
-    const { block, previousBlock, blocksCount } = data.data
+    const { block, previousBlock, blocksCount, viewOffset = 0 } = data.data
+    // Sync view offset forward so we validate against the same proposer.
+    if (!isCommittee && viewOffset > this._viewOffset) this._viewOffset = viewOffset
+    if (isCommittee && viewOffset > this._committeeViewOffset)
+      this._committeeViewOffset = viewOffset
+    // Proposer is working — cancel the view-change countdown
+    clearTimeout(this._blockCreationTimeout)
+    this._blockCreationTimeout = null
     if (
       !this.blockPool.existingBlock(block, isCommittee) &&
-      this.blockchain.isValidBlock(block, blocksCount, previousBlock, isCommittee)
+      this.blockchain.isValidBlock(block, blocksCount, previousBlock, isCommittee, viewOffset)
     ) {
       this.blockPool.addBlock(block, isCommittee)
       this.transactionPool.assignTransactions(block, isCommittee)
@@ -568,10 +757,11 @@ class P2pserver {
   }
 
   _handlePrepare(data, isCommittee) {
+    const activeValidators = isCommittee ? this.committeeValidators : this.validators
     if (
       !this.preparePool.existingPrepare(data.prepare, isCommittee) &&
       this.preparePool.isValidPrepare(data.prepare, this.wallet) &&
-      this.validators.isValidValidator(data.prepare.publicKey)
+      activeValidators.isValidValidator(data.prepare.publicKey)
     ) {
       this.preparePool.addPrepare(data.prepare, isCommittee)
       this.broadcastPrepare(data.port, data.prepare, isCommittee)
@@ -588,10 +778,11 @@ class P2pserver {
   }
 
   async _handleCommit(data, isCommittee) {
+    const activeValidators = isCommittee ? this.committeeValidators : this.validators
     if (
       !this.commitPool.existingCommit(data.commit, isCommittee) &&
       this.commitPool.isValidCommit(data.commit) &&
-      this.validators.isValidValidator(data.commit.publicKey)
+      activeValidators.isValidValidator(data.commit.publicKey)
     ) {
       this.commitPool.addCommit(data.commit, isCommittee)
       this.broadcastCommit(data.port, data.commit, isCommittee)
@@ -609,6 +800,20 @@ class P2pserver {
         )
 
         if (result !== false) {
+          // Block committed — cancel view-change countdown and reset offset for next round
+          clearTimeout(this._blockCreationTimeout)
+          this._blockCreationTimeout = null
+          if (isCommittee) {
+            this._committeeViewOffset = 0
+            this._committeeInactivityViewRotated = false
+            this._committeePoolWasFullThisEpoch = false
+            this._committeeViewChangeVotes = new Map()
+          } else {
+            this._viewOffset = 0
+            this._inactivityViewRotated = false
+            this._poolWasFullThisEpoch = false
+            this._viewChangeVotes = new Map()
+          }
           this.broadcastBlockToCore(result, isCommittee)
           const chainLength = isCommittee
             ? this.blockchain.committeeChain.length
@@ -626,6 +831,17 @@ class P2pserver {
             : this.blockchain.chain[SUBSET_INDEX][this.blockchain.chain[SUBSET_INDEX].length - 1]
 
           const message = this.messagePool.createMessage(latestBlock, this.wallet)
+          // Immediately clear pool and start next block — don't wait for round-change quorum.
+          // The PBFT commit phase already guarantees 2f+1 agreement — all honest nodes that
+          // reach here have already committed. Clearing immediately eliminates one full P2P
+          // gossip round-trip of dead time between every consecutive block.
+          this.transactionPool.clear(data.commit.blockHash, result.data, isCommittee)
+          const _pendingCount = isCommittee
+            ? this.transactionPool.committeeTransactions.unassigned.length
+            : this.transactionPool.transactions.unassigned.length
+          if (_pendingCount > 0) {
+            this.initiateBlockCreation(P2P_PORT, false, isCommittee)
+          }
           this.broadcastRoundChange(data.port, message, isCommittee)
         } else {
           const chainLength = isCommittee
@@ -652,11 +868,44 @@ class P2pserver {
     }
   }
 
+  _handleViewChange(data, isCommittee) {
+    const activeValidators = isCommittee ? this.committeeValidators : this.validators
+    const { targetView, publicKey } = data.viewChange
+    if (!activeValidators.isValidValidator(publicKey)) return
+    const votesMap = isCommittee ? this._committeeViewChangeVotes : this._viewChangeVotes
+    if (!votesMap.has(targetView)) votesMap.set(targetView, new Set())
+    const votes = votesMap.get(targetView)
+    if (votes.has(publicKey)) return // deduplicate
+    votes.add(publicKey)
+    // Relay so all shard peers receive this vote
+    this.broadcastViewChange(data.port, data.viewChange, isCommittee)
+    // Quorum reached and this view is ahead of where we are — rotate atomically
+    const currentOffset = isCommittee ? this._committeeViewOffset : this._viewOffset
+    if (votes.size >= MIN_APPROVALS && targetView > currentOffset) {
+      if (isCommittee) this._committeeViewOffset = targetView
+      else this._viewOffset = targetView
+      // Reset both epoch flags so initiateBlockCreation (called immediately below)
+      // can fire another vote right away if the NEW proposer at this view is also
+      // faulty — eliminates the 10 s timeout wait for consecutive faulty proposers.
+      const poolFullFlag = isCommittee ? '_committeePoolWasFullThisEpoch' : '_poolWasFullThisEpoch'
+      const rotatedFlag = isCommittee ? '_committeeInactivityViewRotated' : '_inactivityViewRotated'
+      this[poolFullFlag] = false
+      this[rotatedFlag] = false
+      // Return all TX that are assigned to the abandoned block back to the
+      // unassigned pool immediately — new proposer can pick them up at once
+      // instead of waiting up to 30 s for the safety-reassignment timers.
+      this.transactionPool.releaseAssigned(isCommittee)
+      logger.log(P2P_PORT, 'VIEW CHANGE (quorum) — rotating to view', targetView)
+      this.initiateBlockCreation(P2P_PORT, false, isCommittee)
+    }
+  }
+
   _handleRoundChange(data, isCommittee) {
+    const activeValidators = isCommittee ? this.committeeValidators : this.validators
     if (
       !this.messagePool.existingMessage(data.message, isCommittee) &&
       this.messagePool.isValidMessage(data.message) &&
-      this.validators.isValidValidator(data.message.publicKey)
+      activeValidators.isValidValidator(data.message.publicKey)
     ) {
       this.messagePool.addMessage(data.message, isCommittee)
       this.broadcastRoundChange(data.port, data.message, isCommittee)
@@ -672,6 +921,15 @@ class P2pserver {
 
         logger.log(P2P_PORT, 'TRANSACTION POOL TO BE CLEARED, TOTAL NOW:', transactionList?.length)
         this.transactionPool.clear(data.message.blockHash, data.message.data, isCommittee)
+        // Re-arm block creation if there are still unassigned transactions.
+        // Without this, the pool stalls after JMeter stops because no new
+        // TRANSACTION_RECEIVED events arrive to call _scheduleTimeoutBlockCreation.
+        const remainingUnassigned = isCommittee
+          ? this.transactionPool.committeeTransactions.unassigned.length
+          : this.transactionPool.transactions.unassigned.length
+        if (remainingUnassigned > 0) {
+          this.initiateBlockCreation(P2P_PORT, false, isCommittee)
+        }
       }
     }
   }
@@ -692,13 +950,14 @@ class P2pserver {
           subsetIndex: data.subsetIndex
         })
 
+        const activeValidators = isCommittee ? this.committeeValidators : this.validators
         if (
           !this.transactionPool.transactionExists(transaction, isCommittee) &&
           this.transactionPool.verifyTransaction(transaction) &&
-          this.validators.isValidValidator(transaction.from)
+          activeValidators.isValidValidator(transaction.from)
         ) {
           this.transactionPool.addTransaction(transaction, isCommittee)
-          logger.log(
+          logger.debug(
             P2P_PORT,
             'COMMITTEE TRANSACTION ADDED, TOTAL NOW:',
             this.transactionPool.committeeTransactions.unassigned.length
@@ -720,7 +979,7 @@ class P2pserver {
   }
 
   async parseMessage(data, isCore, isCommittee = false) {
-    logger.log(P2P_PORT, 'RECEIVED', data.type, data.port)
+    logger.debug(P2P_PORT, 'RECEIVED', data.type, data.port)
 
     if (IS_FAULTY && ![MESSAGE_TYPE.transaction].includes(data.type)) {
       return
@@ -741,6 +1000,9 @@ class P2pserver {
         break
       case MESSAGE_TYPE.round_change:
         this._handleRoundChange(data, isCommittee)
+        break
+      case MESSAGE_TYPE.view_change:
+        this._handleViewChange(data, isCommittee)
         break
       case MESSAGE_TYPE.block_from_core:
         await this._handleBlockFromCore(data, isCore, isCommittee)

@@ -17,7 +17,7 @@ const MESSAGE_TYPE = require('./constants/message')
 
 const HTTP_PORT = process.env.HTTP_PORT || 3001
 const P2P_PORT = process.env.P2P_PORT || 5001
-const { NODES_SUBSET, SUBSET_INDEX } = config.get()
+const { NODES_SUBSET, SUBSET_INDEX, COMMITTEE_SUBSET } = config.get()
 
 // Instantiate all objects
 const app = express()
@@ -26,7 +26,12 @@ app.use(bodyParser.json())
 const wallet = new Wallet(process.env.SECRET)
 const transactionPool = new TransactionPool()
 const validators = new Validators(NODES_SUBSET)
-const blockchain = new Blockchain(validators, transactionPool)
+// Committee validators are based on COMMITTEE_SUBSET so that committee nodes
+// from different shards can validate each other's messages. Without this, cross-shard
+// committee transactions would be silently rejected by shard validators.
+const committeeValidators =
+  COMMITTEE_SUBSET.length > 0 ? new Validators(COMMITTEE_SUBSET) : validators
+const blockchain = new Blockchain(validators, transactionPool, false, committeeValidators)
 const blockPool = new BlockPool()
 const preparePool = new PreparePool()
 const commitPool = new CommitPool()
@@ -41,7 +46,8 @@ const p2pserver = new P2pserver(
   commitPool,
   messagePool,
   validators,
-  idaGossip
+  idaGossip,
+  committeeValidators
 )
 
 // sends all transactions in the transaction pool to the user
@@ -57,9 +63,11 @@ app.get('/blocks', (request, response) => {
 // sends the chain stats to the user
 app.get('/stats', async (request, response) => {
   const rate = await blockchain.getRate(p2pserver.sockets)
+  const { IS_FAULTY } = config.get()
   const stats = {
     total: blockchain.getTotal(),
-    rate
+    rate,
+    isFaulty: IS_FAULTY
   }
   logger.log(`REQUEST STATS FOR #${SUBSET_INDEX}:`, JSON.stringify(stats))
   response.json(stats)
@@ -72,11 +80,11 @@ app.get('/health', (request, response) => {
 
 // creates transactions for the sent data
 app.post('/transaction', async (request, response) => {
-  const { REDIRECT_TO_URL, SHOULD_REDIRECT_FROM_FAULTY_NODES } = config.get()
+  const { IS_FAULTY, REDIRECT_TO_URL, SHOULD_REDIRECT_FROM_FAULTY_NODES } = config.get()
   const unassignedTransactions = transactionPool.transactions.unassigned
-  const hasUnassignedTransactions =
-    unassignedTransactions && unassignedTransactions.length > 0
+  const hasUnassignedTransactions = unassignedTransactions && unassignedTransactions.length > 0
   if (
+    IS_FAULTY &&
     SHOULD_REDIRECT_FROM_FAULTY_NODES &&
     Array.isArray(REDIRECT_TO_URL) &&
     REDIRECT_TO_URL.length > 0
@@ -89,9 +97,7 @@ app.post('/transaction', async (request, response) => {
           message: {
             transactions: hasUnassignedTransactions
               ? [
-                  ...unassignedTransactions.map(
-                    (transaction) => transaction.input.data
-                  ),
+                  ...unassignedTransactions.map((transaction) => transaction.input.data),
                   request.body
                 ]
               : request.body
@@ -103,7 +109,7 @@ app.post('/transaction', async (request, response) => {
           transactionPool.transactions.unassigned = []
         }
         // If successful, return the response immediately
-        return response.status(200)
+        return response.status(200).send()
       } catch (error) {
         lastError = error
         // Try next redirectUrl in the array
@@ -115,21 +121,24 @@ app.post('/transaction', async (request, response) => {
       .status(lastError?.response?.status || 500)
       .send(lastError?.message || 'All redirects failed')
   } else {
-    const data = request.body.transactions
-      ? request.body.transactions
-      : [request.body]
-    data.forEach((item) => {
-      logger.log(`Processing transaction on ${HTTP_PORT}`, JSON.stringify(item))
-      const transaction = wallet.createTransaction(item)
-      // Process locally FIRST before broadcasting
-      p2pserver.parseMessage({
-        type: MESSAGE_TYPE.transaction,
-        transaction,
-        port: P2P_PORT
+    try {
+      const data = request.body.transactions ? request.body.transactions : [request.body]
+      data.forEach((item) => {
+        logger.debug(`Processing transaction on ${HTTP_PORT}`, JSON.stringify(item))
+        const transaction = wallet.createTransaction(item)
+        // Process locally FIRST before broadcasting
+        p2pserver.parseMessage({
+          type: MESSAGE_TYPE.transaction,
+          transaction,
+          port: P2P_PORT
+        })
+        p2pserver.broadcastTransaction(P2P_PORT, transaction)
       })
-      p2pserver.broadcastTransaction(P2P_PORT, transaction)
-    })
-    response.redirect('/stats')
+      response.json({ ok: true })
+    } catch (error) {
+      logger.warn(`Transaction processing error on ${HTTP_PORT}:`, error)
+      response.json({ ok: true })
+    }
   }
 })
 

@@ -46,19 +46,9 @@ class IDAGossip {
     const sockets = socketsKey
       ? (this.socketGossipPeers[socketsKey] ?? this.socketGossipPeers)
       : this.socketGossipPeers
-    const allPorts = Object.keys(sockets)
-    const filteredPorts = allPorts.filter((port) => !sendersSubset.includes(port))
-    const logger = require('../utils/logger')
-    logger.log(
-      'IDA GOSSIP PEER SELECTION:',
-      'all:',
-      allPorts,
-      'exclude:',
-      sendersSubset,
-      'selected:',
-      filteredPorts
-    )
-    return filteredPorts.map((port) => sockets[port].socket)
+    return Object.keys(sockets)
+      .filter((port) => !sendersSubset.includes(port))
+      .map((port) => sockets[port].socket)
   }
 
   getSocketGossipCore(socketsKey) {
@@ -79,6 +69,19 @@ class IDAGossip {
     const fileBuffer = Buffer.from(jsonString, 'utf8')
 
     const fileSizeKB = fileBuffer.length / 1024
+
+    // For small payloads (< 2 KB) skip IDA fragmentation entirely — send as a
+    // single chunk with no stagger.  This cuts prepare/commit/view-change/round-
+    // change message latency from a 100 ms floor (2-chunk reconstruction wait)
+    // to near-zero.  Safe for Enhanced's 4-node shards where shouldGossip=false
+    // (direct send to ≤3 fixed peers) — no gossip fan-out means no congestion risk.
+    if (!customTotalChunks && !customRequiredChunks && fileSizeKB < 2) {
+      const fileHash = nodeCrypto.createHash('sha256').update(fileBuffer).digest('hex')
+      return [
+        { id: uuidv1(), index: 0, data: fileBuffer.toString('base64'), totalChunks: 1, fileHash }
+      ]
+    }
+
     let totalChunks, requiredChunks
 
     if (customTotalChunks && customRequiredChunks) {
@@ -201,14 +204,17 @@ class IDAGossip {
     return Math.ceil(1.85 * Math.log10(numberNodes) - 0.67)
   }
 
-  sendToShardPeers({ message, chunkKey, senderPort }) {
+  sendToShardPeers({ message, chunkKey, senderPort, consensusMessage = false }) {
+    // Consensus messages (pre-prepare, prepare, commit, round-change) MUST reach every
+    // validator in the shard — gossip would randomly drop some recipients and make
+    // reaching MIN_APPROVALS impossible. Transactions can still use gossip for efficiency.
     return this.sendData({
       message,
       chunkKey,
       communicationType: 'ws',
       sendersSubset: [senderPort],
       targetsSubset: [],
-      shouldGossip: NUMBER_OF_NODES_PER_SHARD > 4,
+      shouldGossip: !consensusMessage && NUMBER_OF_NODES_PER_SHARD > 4,
       ttl: this.calculateTTL(NUMBER_OF_NODES_PER_SHARD),
       socketsKey: 'peers'
     })
@@ -279,7 +285,32 @@ class IDAGossip {
   }) {
     const chunks = chunkKey ? this.splitData(message[chunkKey]) : [message]
 
-    // Wait for all gossipChunk promises to resolve
+    // Single-chunk fast path: bypass Promise+setTimeout entirely and call
+    // gossipChunk in the CURRENT event-loop tick.  The <2KB bypass in
+    // splitData guarantees single-chunk for all consensus messages (prepare,
+    // commit, pre-prepare, view-change, round-change, transaction,
+    // block_to_core, rate_to_core).  Every setTimeout(fn, 0) still schedules
+    // a timer entry and defers execution until the NEXT timer phase — adding
+    // ~1–4 ms latency per consensus hop.  With 6 shards × ~18 PBFT rounds ×
+    // ~9 messages/round that accumulates into real round-trip delay.
+    if (chunks.length === 1) {
+      const processedMessage = {
+        ...message,
+        sendersSubset,
+        communicationType,
+        targetsSubset,
+        shouldGossip,
+        socketsKey,
+        chunkKey
+      }
+      if (chunkKey) {
+        processedMessage[chunkKey] = chunks[0]
+      }
+      return this.gossipChunk(processedMessage, ttl)
+    }
+
+    // Multi-chunk path: stagger sends to avoid overwhelming the network.
+    // 10 ms per chunk is sufficient for Enhanced's 4-node shards.
     const promises = chunks.map((chunk, index) => {
       const processedMessage = {
         ...message,
@@ -293,11 +324,10 @@ class IDAGossip {
       if (chunkKey) {
         processedMessage[chunkKey] = chunk
       }
-      // Stagger chunk sending to avoid overwhelming network
       return new Promise((resolve) => {
         setTimeout(() => {
           resolve(this.gossipChunk(processedMessage, ttl))
-        }, index * 100)
+        }, index * 10)
       })
     })
     return Promise.all(promises)
@@ -335,6 +365,24 @@ class IDAGossip {
 
   // Try to reconstruct data from chunks
   tryReconstructData(fileHash, totalChunks) {
+    // Fast path for single-chunk messages — the common case with Enhanced's
+    // <2KB bypass. Avoids: Array.from(fileChunks.values()) allocation, .filter()
+    // scan, .sort(), Buffer.concat([single]), and a second full-map cleanup loop.
+    // The chunk is always stored at key `${fileHash}-0` for index=0 single-chunk
+    // messages because splitData returns [{index:0,...}] for them.
+    if (totalChunks === 1) {
+      const chunk = this.fileChunks.get(`${fileHash}-0`)
+      if (!chunk) return undefined
+      const reconstructedBuffer = Buffer.from(chunk.data, 'base64')
+      const reconstructedHash = nodeCrypto
+        .createHash('sha256')
+        .update(reconstructedBuffer)
+        .digest('hex')
+      if (reconstructedHash !== fileHash) return undefined
+      this.fileChunks.delete(`${fileHash}-0`)
+      return JSON.parse(reconstructedBuffer.toString('utf8'))
+    }
+
     const chunks = Array.from(this.fileChunks.values())
       .filter((chunk) => chunk.fileHash === fileHash)
       .sort((a, b) => a.index - b.index)

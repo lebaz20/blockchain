@@ -1,10 +1,7 @@
 const fs = require('fs')
 const path = require('path')
 
-const CONFIG_PATH = path.join(
-  __dirname,
-  `config.persisted.${process.env.HTTP_PORT}.json`
-)
+const CONFIG_PATH = path.join(__dirname, `config.persisted.${process.env.HTTP_PORT}.json`)
 
 // Load config from file or fallback to env/defaults
 function loadConfig() {
@@ -22,25 +19,25 @@ function loadConfig() {
     ? parseInt(process.env.NUMBER_OF_NODES_PER_SHARD, 10)
     : 4
 
-  const DEFAULT_TTL = process.env.DEFAULT_TTL
-    ? parseInt(process.env.DEFAULT_TTL, 10)
-    : 6
+  const DEFAULT_TTL = process.env.DEFAULT_TTL ? parseInt(process.env.DEFAULT_TTL, 10) : 6
   const NUMBER_OF_NODES = process.env.NUMBER_OF_NODES
     ? parseInt(process.env.NUMBER_OF_NODES, 10)
     : 8
-  const NODES_SUBSET = process.env.NODES_SUBSET
-    ? JSON.parse(process.env.NODES_SUBSET)
-    : []
+  const NODES_SUBSET = process.env.NODES_SUBSET ? JSON.parse(process.env.NODES_SUBSET) : []
 
-  const SHOULD_REDIRECT_FROM_FAULTY_NODES =
-    process.env.SHOULD_REDIRECT_FROM_FAULTY_NODES === 'true'
+  const SHOULD_REDIRECT_FROM_FAULTY_NODES = process.env.SHOULD_REDIRECT_FROM_FAULTY_NODES === 'true'
   const IS_FAULTY = process.env.IS_FAULTY === 'true'
 
   // improve performance by using a subset of nodes in the network
   const NUMBER_OF_FAULTY_NODES = process.env.NUMBER_OF_FAULTY_NODES || 0
 
   // Minimum number of positive votes required for the message/block to be valid
-  const MIN_APPROVALS = 2 * (NUMBER_OF_NODES_PER_SHARD / 3)
+  // Standard PBFT safety threshold: 2f+1 where f = floor((n-1)/3)
+  // This tolerates up to floor((n-1)/3) faulty nodes per shard.
+  // The naive formula 2*(n/3) gives 5.33 for n=8 (requires 6 votes) which is
+  // stricter than necessary — shards with 3 faulty out of 8 only have 5 honest
+  // nodes and would never reach consensus even though PBFT allows it.
+  const MIN_APPROVALS = 2 * Math.floor((NUMBER_OF_NODES_PER_SHARD - 1) / 3) + 1
 
   // SUBSET INDEX
   const SUBSET_INDEX = process.env.SUBSET_INDEX ?? 'SUBSET1'

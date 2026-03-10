@@ -26,6 +26,6 @@ describe('Timeouts', () => {
   it('should have expected timeout constants', () => {
     expect(timeouts.BLOCK_CREATION_TIMEOUT_MS).toBe(10000)
     expect(timeouts.TRANSACTION_INACTIVITY_THRESHOLD_MS).toBe(8000)
-    expect(timeouts.TRANSACTION_REASSIGNMENT_TIMEOUT_MS).toBe(120000)
+    expect(timeouts.TRANSACTION_REASSIGNMENT_TIMEOUT_MS).toBe(30000)
   })
 })

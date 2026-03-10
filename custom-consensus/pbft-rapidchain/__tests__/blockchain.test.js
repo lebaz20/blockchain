@@ -9,7 +9,8 @@ jest.mock('../config', () => ({
     NUMBER_OF_NODES_PER_SHARD: 4,
     SUBSET_INDEX: 'SUBSET0',
     IS_FAULTY: false,
-    MIN_APPROVALS: 3
+    MIN_APPROVALS: 3,
+    COMMITTEE_SUBSET: []
   })
 }))
 
@@ -242,7 +243,8 @@ describe('Blockchain', () => {
       const total = blockchain.getTotal()
 
       expect(total.SUBSET0).toBeDefined()
-      expect(total.SUBSET0.blocks).toBe(1)
+      // Genesis block is excluded from the count (it has no real transactions)
+      expect(total.SUBSET0.blocks).toBe(0)
       expect(total.SUBSET0.transactions).toBe(0)
       expect(total.SUBSET0.unassignedTransactions).toBe(0)
     })
@@ -256,7 +258,7 @@ describe('Blockchain', () => {
 
       const total = blockchain.getTotal()
 
-      expect(total.SUBSET0.blocks).toBe(3) // Genesis + 2 blocks
+      expect(total.SUBSET0.blocks).toBe(2) // 2 real blocks (genesis excluded)
       expect(total.SUBSET0.transactions).toBe(3)
     })
 
@@ -266,8 +268,8 @@ describe('Blockchain', () => {
 
       const total = blockchain.getTotal()
 
-      expect(total.SUBSET0.blocks).toBe(1)
-      expect(total.SUBSET1.blocks).toBe(2)
+      expect(total.SUBSET0.blocks).toBe(0) // genesis only, no real blocks
+      expect(total.SUBSET1.blocks).toBe(1) // genesis + 1 real block → 1 real block
     })
   })
 

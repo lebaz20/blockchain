@@ -14,6 +14,11 @@ class Coreserver {
     this.rates = {}
     this.idaGossip = idaGossip
     this.config = config.get()
+    // Idempotency cache: last JSON-serialised config sent to each shard.
+    // clearRedirectConfiguration fires on every rate_to_core update, pushing
+    // {REDIRECT_TO_URL:[]} to all healthy shards even when nothing changed.
+    // Skipping no-op sends eliminates ~60 spurious WebSocket calls/sec from core.
+    this._lastSentConfig = new Map() // shardIndex → JSON string of last config
   }
 
   // Creates a server on a given port
@@ -60,6 +65,12 @@ class Coreserver {
 
   // update config
   updateConfig(config, subsetIndex) {
+    // Skip if the config value for this shard hasn't changed — prevents
+    // clearRedirectConfiguration from spamming healthy shards with no-op
+    // {REDIRECT_TO_URL:[]} messages on every incoming rate_to_core event.
+    const configKey = JSON.stringify(config)
+    if (this._lastSentConfig.get(subsetIndex) === configKey) return
+    this._lastSentConfig.set(subsetIndex, configKey)
     this.idaGossip.sendFromCoreToSpecificShard({
       message: {
         type: MESSAGE_TYPE.config_from_core,
@@ -132,9 +143,7 @@ class Coreserver {
       ([faultyShardIndex, { redirectSubset }]) => {
         let redirectUrls = []
         if (this.sockets[redirectSubset]) {
-          redirectUrls = Object.values(this.sockets[redirectSubset]).map(
-            (object) => object.url
-          )
+          redirectUrls = Object.values(this.sockets[redirectSubset]).map((object) => object.url)
           const config = [{ key: 'REDIRECT_TO_URL', value: redirectUrls }]
           this.updateConfig(config, faultyShardIndex)
         }
@@ -154,13 +163,14 @@ class Coreserver {
   handleFaultyShardRedirection() {
     const shardStatusMap = this.calculateShardStatusMap()
     const faultyShards = shardStatusMap[SHARD_STATUS.faulty] || []
-    const underUtilizedShards =
-      shardStatusMap[SHARD_STATUS.under_utilized] || []
+    const underUtilizedShards = shardStatusMap[SHARD_STATUS.under_utilized] || []
     const normalShards = shardStatusMap[SHARD_STATUS.normal] || []
     const overUtilizedShards = shardStatusMap[SHARD_STATUS.over_utilized] || []
 
-    const faultyShardRedirectAssignment =
-      this.buildFaultyShardRedirectAssignment(faultyShards, shardStatusMap)
+    const faultyShardRedirectAssignment = this.buildFaultyShardRedirectAssignment(
+      faultyShards,
+      shardStatusMap
+    )
 
     this.applyRedirectConfiguration(faultyShardRedirectAssignment)
     this.clearRedirectConfiguration([
@@ -186,9 +196,7 @@ class Coreserver {
         switch (data.type) {
           case MESSAGE_TYPE.block_to_core:
             // add updated block to chain
-            if (
-              !this.blockchain.existingBlock(data.block.hash, data.subsetIndex)
-            ) {
+            if (!this.blockchain.existingBlock(data.block.hash, data.subsetIndex)) {
               this.blockchain.addBlock(data.block, data.subsetIndex)
               const stats = {
                 total: this.blockchain.getTotal(),

@@ -24,11 +24,22 @@ class Blockchain {
     if (!isCore) {
       this.validatorList = validators.generateAddresses(NODES_SUBSET)
       this.transactionPool = transactionPool
-      this.chain = {
-        [SUBSET_INDEX]: [Block.genesis()]
-      }
+      const genesis = Block.genesis()
+      this.chain = { [SUBSET_INDEX]: [genesis] }
+      // O(1) existingBlock index — one Set per shard chain keyed by block hash.
+      // Enhanced has 6 shard chains (own + 5 foreign received via core); a Set
+      // lookup eliminates the O(n) array.find on every incoming commit message
+      // and every cross-shard block_from_core event.
+      this._blockHashSets = { [SUBSET_INDEX]: new Set([genesis.hash]) }
+      // O(1) transaction counter for getTotal() — incremented in addBlock.
+      // Enhanced's core pod accumulates 6 shard chains and calls getTotal() on
+      // every block_to_core message; the O(n) slice+reduce over all blocks was
+      // doing ~90 000 iterations over a 90 s test just for stats logging.
+      this._txCountCache = { [SUBSET_INDEX]: 0 } // genesis has 0 TXs
     } else {
       this.chain = {}
+      this._blockHashSets = {}
+      this._txCountCache = {}
     }
     // Track the rate of incoming blocks
     this.ratePerMin = {}
@@ -67,7 +78,10 @@ class Blockchain {
 
   addBlock(block, subsetIndex = SUBSET_INDEX) {
     if (!this.chain[subsetIndex]) {
-      this.chain[subsetIndex] = [Block.genesis()]
+      const genesis = Block.genesis()
+      this.chain[subsetIndex] = [genesis]
+      this._blockHashSets[subsetIndex] = new Set([genesis.hash])
+      this._txCountCache[subsetIndex] = 0
     }
     block.createdAt = Date.now()
     if (!this.ratePerMin[subsetIndex]) {
@@ -75,6 +89,9 @@ class Blockchain {
     }
     RateUtility.updateRatePerMin(this.ratePerMin[subsetIndex], block.createdAt)
     this.chain[subsetIndex].push(block)
+    // Update O(1) indices
+    this._blockHashSets[subsetIndex].add(block.hash)
+    this._txCountCache[subsetIndex] = (this._txCountCache[subsetIndex] ?? 0) + block.data.length
     logger.log('NEW BLOCK ADDED TO CHAIN')
     return block
   }
@@ -88,7 +105,7 @@ class Blockchain {
     return block
   }
 
-  getProposer(blocksCount = undefined) {
+  getProposer(blocksCount = undefined, viewOffset = 0) {
     const currentChainLength = this.chain[SUBSET_INDEX].length
     let blockIndex = (blocksCount ?? currentChainLength) - 1
     if (!this.chain[SUBSET_INDEX][blockIndex]?.hash) {
@@ -99,7 +116,7 @@ class Blockchain {
     const hashCharCode =
       this.chain[SUBSET_INDEX][blockIndex].hash[HASH_FIRST_CHAR_INDEX].charCodeAt(0)
     const proposerRotationModulo = NUMBER_OF_NODES_PER_SHARD
-    const index = (hashCharCode + currentMinute) % proposerRotationModulo
+    const index = (hashCharCode + currentMinute + viewOffset) % proposerRotationModulo
 
     return {
       proposer: this.validatorList[index],
@@ -107,14 +124,14 @@ class Blockchain {
     }
   }
 
-  isValidBlock(block, blocksCount, previousBlock = undefined) {
+  isValidBlock(block, blocksCount, previousBlock = undefined, viewOffset = 0) {
     const lastBlock = previousBlock ?? this.chain[SUBSET_INDEX][this.chain[SUBSET_INDEX].length - 1]
     const isValid =
       lastBlock.sequenceNo + 1 === block.sequenceNo &&
       block.lastHash === lastBlock.hash &&
       block.hash === Block.blockHash(block) &&
       Block.verifyBlock(block) &&
-      Block.verifyProposer(block, this.getProposer(blocksCount).proposer)
+      Block.verifyProposer(block, this.getProposer(blocksCount, viewOffset).proposer)
 
     if (isValid) {
       logger.log('BLOCK VALID')
@@ -148,6 +165,11 @@ class Blockchain {
   }
 
   existingBlock(hash, subsetIndex = SUBSET_INDEX) {
+    // O(1) Set lookup replaces O(n) array.find — chain length grows throughout
+    // the test and existingBlock is called on every incoming commit and every
+    // cross-shard block_from_core event (5x per committed block in Enhanced).
+    const hashSet = this._blockHashSets[subsetIndex]
+    if (hashSet) return hashSet.has(hash)
     return !!this.chain[subsetIndex]?.find((b) => b.hash === hash)
   }
 
@@ -173,11 +195,21 @@ class Blockchain {
   getTotal() {
     const total = {}
     Object.keys(this.chain).forEach((subsetIndex) => {
-      const actualBlocksCount = this.chain[subsetIndex].length
+      // Subtract 1 to exclude the genesis block (always present, always has 0 transactions)
+      const actualBlocksCount = Math.max(0, this.chain[subsetIndex].length - 1)
       total[subsetIndex] = {
         blocks: actualBlocksCount,
-        transactions: this.chain[subsetIndex].reduce((sum, block) => sum + block.data.length, 0),
-        unassignedTransactions: this.transactionPool?.transactions.unassigned.length
+        // O(1) — incremented in addBlock; replaces slice(1).reduce() over every
+        // block in every chain on every call.  Enhanced's core calls getTotal()
+        // on each of the 6 shards' block_to_core events, iterating up to 300
+        // block entries before this fix.
+        transactions: this._txCountCache[subsetIndex] ?? 0,
+        // Only this node's own pool is visible to it; report 0 for foreign shards
+        // so the stats collection script does not multiply the pool size by shard count.
+        unassignedTransactions:
+          subsetIndex === SUBSET_INDEX
+            ? (this.transactionPool?.transactions.unassigned.length ?? 0)
+            : 0
       }
     })
     return total

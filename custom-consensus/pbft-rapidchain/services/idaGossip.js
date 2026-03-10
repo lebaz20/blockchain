@@ -65,6 +65,21 @@ class IDAGossip {
     const fileBuffer = Buffer.from(jsonString, 'utf8')
 
     const fileSizeKB = fileBuffer.length / 1024
+
+    // For small payloads (< 2 KB) skip IDA fragmentation entirely — send as a
+    // single chunk with no stagger.  Prepare, commit, view-change, and round-change
+    // consensus messages are all ~300–500 bytes. Previously they were split into
+    // 2 required + 1 redundant chunk, imposing a 100 ms reconstruction floor on
+    // every one of them (receiver waits for chunk 0 AND chunk 1). Bypassing
+    // fragmentation removes that floor.  Safe because consensus messages always
+    // use shouldGossip=false (direct send to all peers) regardless of shard size.
+    if (!customTotalChunks && !customRequiredChunks && fileSizeKB < 2) {
+      const fileHash = nodeCrypto.createHash('sha256').update(fileBuffer).digest('hex')
+      return [
+        { id: uuidv1(), index: 0, data: fileBuffer.toString('base64'), totalChunks: 1, fileHash }
+      ]
+    }
+
     let totalChunks, requiredChunks
 
     if (customTotalChunks && customRequiredChunks) {
@@ -187,14 +202,19 @@ class IDAGossip {
     return Math.ceil(1.85 * Math.log10(numberNodes) - 0.67)
   }
 
-  sendToShardPeers({ message, chunkKey, senderPort, socketsKey }) {
+  sendToShardPeers({ message, chunkKey, senderPort, socketsKey, consensusMessage = false }) {
+    // Consensus messages (pre-prepare, prepare, commit, round-change) MUST reach every
+    // validator in the shard, so gossip is disabled for them. With TTL=1 and random
+    // 4-of-N gossip, only 4 nodes would receive the message — below MIN_APPROVALS=6
+    // for an 8-node shard and consensus would be impossible. Transaction messages can
+    // still use gossip for efficiency.
     return this.sendData({
       message,
       chunkKey,
       communicationType: 'ws',
       sendersSubset: [senderPort],
       targetsSubset: [],
-      shouldGossip: NUMBER_OF_NODES_PER_SHARD > 4,
+      shouldGossip: !consensusMessage && NUMBER_OF_NODES_PER_SHARD > 4,
       ttl: this.calculateTTL(NUMBER_OF_NODES_PER_SHARD),
       socketsKey: socketsKey ?? 'peers'
     })
@@ -279,7 +299,12 @@ class IDAGossip {
       if (chunkKey) {
         processedMessage[chunkKey] = chunk
       }
-      // Stagger chunk sending to avoid overwhelming network
+      // Stagger chunk sending to avoid overwhelming the network.
+      // 100 ms between chunks is intentional for RapidChain's 12-node gossip:
+      // transaction messages use shouldGossip=true with 4 random peers per forward,
+      // so a multi-chunk burst without pacing can cause message storms. Consensus
+      // messages (shouldGossip=false) are already handled by the < 2 KB single-
+      // chunk bypass above, so they incur 0 stagger regardless.
       return new Promise((resolve) => {
         setTimeout(() => {
           resolve(this.gossipChunk(processedMessage, ttl))

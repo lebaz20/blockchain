@@ -259,7 +259,12 @@ const k8sConfig = {
 }
 fs.writeFileSync(kubeFile, yaml.dump(k8sConfig))
 
-const ports = environmentArray.map((environment) => environment.HTTP_PORT)
+// Exclude faulty nodes from JMeter targeting — they accept TX but never commit
+// them, so including them introduces random variance based on how many faulty
+// ports happen to get high weights. Filtering them out makes results consistent.
+const ports = environmentArray
+  .filter((environment) => !environment.IS_FAULTY)
+  .map((environment) => environment.HTTP_PORT)
 const weights = ports.map(() => Math.floor(Math.random() * 10) + 1) // random weight 1-10
 
 const weightedPorts = []

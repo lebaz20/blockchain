@@ -60,7 +60,7 @@ const getRandomIndicesArrays = (array) => {
   const shuffledArray = shuffleArray(indices)
   const faultyNodes = shuffleArray(shuffledArray).slice(0, NUMBER_OF_FAULTY_NODES)
   const committeeShard = HAS_COMMITTEE_SHARD
-    ? shuffleArray(shuffledArray.filter((_, index) => !faultyNodes.includes(index))).slice(
+    ? shuffleArray(shuffledArray.filter((value) => !faultyNodes.includes(value))).slice(
         0,
         NUMBER_OF_NODES_PER_SHARD
       )
@@ -130,6 +130,12 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
       if (committeePeersSubset.length > 0 && committeeSubset.includes(index)) {
         console.log(`COMMITTEE Peers for ${5001 + index}: `, committeePeersSubset)
         environmentVariables.COMMITTEE_PEERS = committeePeersSubset.join(',')
+      }
+      // Set COMMITTEE_SUBSET for ALL committee members regardless of whether they have
+      // lower-indexed committee peers. Without this, the lowest-indexed committee member
+      // gets COMMITTEE_SUBSET=[] and never calls connectToCore(true), making it invisible
+      // to the core's committee broadcast.
+      if (committeeSubset.includes(index)) {
         environmentVariables.COMMITTEE_SUBSET = JSON.stringify(committeeSubset)
       }
       if (peersSubset.length > 0 && nodesSubset.includes(index)) {
@@ -293,7 +299,12 @@ const k8sConfig = {
 }
 fs.writeFileSync(kubeFile, yaml.dump(k8sConfig))
 
-const ports = environmentArray.map((environment) => environment.HTTP_PORT)
+// Exclude faulty nodes from JMeter targeting — they accept TX but never commit
+// them, so including them introduces random variance based on how many faulty
+// ports happen to get high weights. Filtering them out makes results consistent.
+const ports = environmentArray
+  .filter((environment) => !environment.IS_FAULTY)
+  .map((environment) => environment.HTTP_PORT)
 const weights = ports.map(() => Math.floor(Math.random() * 10) + 1) // random weight 1-10
 
 const weightedPorts = []
