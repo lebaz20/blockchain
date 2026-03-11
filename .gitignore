@@ -37,7 +37,10 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 coverage/
 *.lcov
 .nyc_output/
-performance-results/
+# Ignore all performance-results content except comparison markdown reports
+**/performance-results/**
+!**/performance-results/**/
+!**/performance-results/**/performance-comparison-*.md
 *.jtl
 temp/
 *.tmp
