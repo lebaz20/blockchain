@@ -22,9 +22,11 @@ COMPARISON_FILE="performance-comparison-${TIMESTAMP}.md"
 
 # Shared configuration — exported so BOTH sub-scripts use identical values.
 # Override any of these via env before calling this script.
-export NUMBER_OF_NODES=${NUMBER_OF_NODES:-24}
+export NUMBER_OF_NODES=${NUMBER_OF_NODES:-512}
 export TRANSACTION_THRESHOLD=${TRANSACTION_THRESHOLD:-100}
-export NUMBER_OF_FAULTY_NODES=${NUMBER_OF_FAULTY_NODES:-7}
+# 85 faulty nodes across 128 shards (≤1 per shard on average) — safe for both
+# 4-node shards (f=1 limit=128) and 12-node shards (f=3 limit=126).
+export NUMBER_OF_FAULTY_NODES=${NUMBER_OF_FAULTY_NODES:-85}
 export CPU_LIMIT=${CPU_LIMIT:-0.2}
 
 # Per-protocol shard sizes (each uses its own architecture design)
@@ -86,6 +88,16 @@ fi
 
 echo -e "${GREEN}✓ All prerequisites met${NC}\n"
 
+# Raise file-descriptor limit — 512 nodes require ~1024 concurrent port-forward fds.
+# macOS sysctl: sudo sysctl -w kern.maxfiles=1228800 kern.maxfilesperproc=614400
+CURRENT_NOFILE=$(ulimit -n)
+if [ "${CURRENT_NOFILE}" -lt 65536 ] 2>/dev/null; then
+    echo -e "${YELLOW}⚠ File descriptor limit is ${CURRENT_NOFILE} (64k+ recommended for ${NUMBER_OF_NODES} nodes)${NC}"
+    echo -e "${YELLOW}  Run: ulimit -n 65536  (or add to ~/.zshrc for persistence)${NC}"
+    echo -e "${YELLOW}  macOS hard limit: sudo sysctl -w kern.maxfiles=1228800 kern.maxfilesperproc=614400${NC}"
+fi
+ulimit -n 65536 2>/dev/null || true
+
 # Test 1: PBFT-Enhanced
 echo -e "${CYAN}========================================${NC}"
 echo -e "${CYAN}Test 1: PBFT-Enhanced${NC}"
@@ -113,9 +125,9 @@ kubectl delete pods,services --all --ignore-not-found=true 2>/dev/null || true
 # names (e.g. core-server) while the previous run's services are still terminating,
 # causing getaddrinfo ENOTFOUND errors and connection races.
 echo -e "${YELLOW}  Waiting for all pods to terminate...${NC}"
-kubectl wait --for=delete pod --all --timeout=120s 2>/dev/null || true
+kubectl wait --for=delete pod --all --timeout=600s 2>/dev/null || true
 # Also wait for services to be gone so DNS entries are fully cleared
-kubectl wait --for=delete service --all --timeout=60s 2>/dev/null || true
+kubectl wait --for=delete service --all --timeout=300s 2>/dev/null || true
 echo -e "${GREEN}✓ Cleanup complete — all pods and services terminated${NC}\n"
 
 # Test 2: PBFT-RapidChain

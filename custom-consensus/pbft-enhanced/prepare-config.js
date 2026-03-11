@@ -56,11 +56,18 @@ const splitIntoShardsWithRemaining = (array) => {
 const getRandomIndicesArrays = (array) => {
   const indices = Array.from({ length: array.length }, (_, index) => index)
   const shuffledArray = shuffleArray(indices)
-  const faultyNodes = shuffleArray(shuffledArray).slice(0, NUMBER_OF_FAULTY_NODES)
-  return {
-    shards: splitIntoShardsWithRemaining(shuffledArray),
-    faultyNodes
+  const shards = splitIntoShardsWithRemaining(shuffledArray)
+  // Adversarial placement: concentrate f+1 faulty nodes into consecutive shards to
+  // break the maximum number of shards. For 4-node shards f=floor((4-1)/3)=1, so
+  // placing 2 faulty in a shard breaks its consensus — worst case for the protocol.
+  const faultyPerShardToBreak = Math.floor(NUMBER_OF_NODES_PER_SHARD / 3) + 1
+  const faultyNodes = []
+  for (const shard of shards) {
+    const toTake = Math.min(faultyPerShardToBreak, NUMBER_OF_FAULTY_NODES - faultyNodes.length)
+    if (toTake <= 0) break
+    faultyNodes.push(...shard.slice(0, toTake))
   }
+  return { shards, faultyNodes }
 }
 
 const { shards: nodesSubsets, faultyNodes } = getRandomIndicesArrays(

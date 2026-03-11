@@ -1,1 +1,95 @@
+# ── Project-specific generated / runtime files ───────────────────────────────
+# Kubernetes configs produced by prepare-config.js at runtime
+kubeConfig.yml
+nodesEnv.yml
+jmeter_ports.csv
+# AWS credentials / scripts containing secrets
+run-on-aws.txt
+*.pem
+# Blockchain runtime logs
+server.log
+jmeter.log
+/tmp/start-*.log
+
+# ── Dependencies ──────────────────────────────────────────────────────────────
+node_modules/
+jspm_packages/
+web_modules/
+bower_components/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+logs
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# ── Runtime data ──────────────────────────────────────────────────────────────
+pids
+*.pid
+*.seed
+*.pid.lock
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# ── Test results & coverage ───────────────────────────────────────────────────
+coverage/
+*.lcov
+.nyc_output/
+performance-results/
+*.jtl
+temp/
+*.tmp
+
+# ── Build outputs ─────────────────────────────────────────────────────────────
+lib-cov/
+build/Release
+.grunt/
+dist/
+.next/
+out/
+.nuxt/
+.cache/
+.parcel-cache/
+.docusaurus/
+.serverless/
+.fusebox/
+.dynamodb/
+.vuepress/dist
+**/.vitepress/dist
+**/.vitepress/cache
+.temp/
+
+# ── TypeScript / tooling caches ───────────────────────────────────────────────
+*.tsbuildinfo
+.npm/
+.eslintcache
+.stylelintcache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+.node_repl_history
+*.tgz
+.yarn-integrity
+.lock-wscript
+.tern-port
+.vscode-test/
+
+# ── Yarn v2 ───────────────────────────────────────────────────────────────────
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+
+# ── Environment variables ─────────────────────────────────────────────────────
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store

@@ -22,9 +22,9 @@ log() {
 }
 
 # Configuration (use defaults from start.sh if not set)
-export NUMBER_OF_NODES=${NUMBER_OF_NODES:-24}
+export NUMBER_OF_NODES=${NUMBER_OF_NODES:-512}
 export TRANSACTION_THRESHOLD=${TRANSACTION_THRESHOLD:-30}
-export NUMBER_OF_FAULTY_NODES=${NUMBER_OF_FAULTY_NODES:-4}
+export NUMBER_OF_FAULTY_NODES=${NUMBER_OF_FAULTY_NODES:-85}
 export NUMBER_OF_NODES_PER_SHARD=${NUMBER_OF_NODES_PER_SHARD:-4}
 export SHOULD_REDIRECT_FROM_FAULTY_NODES=${SHOULD_REDIRECT_FROM_FAULTY_NODES:-1}
 export CPU_LIMIT=${CPU_LIMIT:-0.2}
@@ -81,7 +81,7 @@ log "${BLUE}Step 1: Starting blockchain (using start.sh)...${NC}"
 START_PID=$!
 
 # Wait for port forwarding to actually work (not just be started)
-TIMEOUT=300
+TIMEOUT=900
 ELAPSED=0
 while true; do
     # Check if at least one port is responding
@@ -107,17 +107,19 @@ wait $START_PID 2>/dev/null || true
 # Re-establish port forwarding (start.sh's subprocess port-forwards die with it)
 pkill -f "kubectl port-forward" 2>/dev/null || true
 sleep 2
+# Raise file-descriptor limit — 512 nodes require ~1024 concurrent port-forward fds
+ulimit -n 65536 2>/dev/null || true
 for ((i=0; i<NUMBER_OF_NODES; i++)); do
     nohup kubectl port-forward pod/p2p-server-$i $((3001+i)):$((3001+i)) >> server.log 2>&1 &
 done
-sleep 15
+sleep 30
 
 log "${GREEN}✓ Blockchain deployed and ready${NC}"
 echo
 
 # Step 2: Wait for blockchain to stabilize
 log "${BLUE}Step 2: Waiting for all nodes to be ready...${NC}"
-TIMEOUT=240
+TIMEOUT=600
 ELAPSED=0
 READY_COUNT=0
 # Only require non-faulty nodes — faulty pods may crash on startup and are already
@@ -126,30 +128,37 @@ MIN_READY=$((NUMBER_OF_NODES - NUMBER_OF_FAULTY_NODES))
 [ $MIN_READY -lt 1 ] && MIN_READY=1
 
 while [ $READY_COUNT -lt $MIN_READY ]; do
-    READY_COUNT=0
+    # Run all health checks in parallel (batches of 64) to avoid sequential curl latency at scale.
+    # Each subshell writes a touch file on success; the count is the number of ready nodes.
+    HCHECK_TMP=$(mktemp -d)
+    # Track only the health-check subshell PIDs so the bare wait below does NOT block
+    # on the long-running kubectl port-forward processes also in this shell's job table.
+    _hcheck_pids=()
     for ((i=0; i<NUMBER_OF_NODES; i++)); do
         PORT=$((3001+i))
-        if curl -s -f http://localhost:$PORT/health > /dev/null 2>&1; then
-            READY_COUNT=$((READY_COUNT + 1))
-        else
-            # Restart port-forward for this node if it's not responding
-            if ! pgrep -f "port-forward pod/p2p-server-$i $PORT" > /dev/null 2>&1; then
-                nohup kubectl port-forward pod/p2p-server-$i $PORT:$PORT >> server.log 2>&1 &
+        (
+            if curl -s -f --max-time 2 http://localhost:$PORT/health > /dev/null 2>&1; then
+                touch "$HCHECK_TMP/ok_$i"
+            else
+                if ! pgrep -f "port-forward pod/p2p-server-$i $PORT" > /dev/null 2>&1; then
+                    nohup kubectl port-forward pod/p2p-server-$i $PORT:$PORT >> server.log 2>&1 &
+                fi
             fi
-        fi
+        ) &
+        _hcheck_pids+=($!)
+        # Throttle: flush every 64 spawns to avoid fd exhaustion
+        if (( (i+1) % 64 == 0 )); then wait "${_hcheck_pids[@]}"; _hcheck_pids=(); fi
     done
-    
+    wait "${_hcheck_pids[@]}"
+    READY_COUNT=$(ls "$HCHECK_TMP"/ok_* 2>/dev/null | wc -l | tr -d ' ')
+    rm -rf "$HCHECK_TMP"
+
     if [ $READY_COUNT -ge $MIN_READY ]; then
         break
     fi
-    
+
     if [ $ELAPSED -ge $TIMEOUT ]; then
         log "${YELLOW}⚠ Timeout: only $READY_COUNT/$NUMBER_OF_NODES nodes responding (need $MIN_READY healthy)${NC}"
-        for ((i=0; i<NUMBER_OF_NODES; i++)); do
-            PORT=$((3001+i))
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$PORT/health 2>/dev/null || echo "unreachable")
-            log "  Node $i (port $PORT): $STATUS"
-        done
         if [ $READY_COUNT -lt $MIN_READY ]; then
             log "${RED}✗ Insufficient healthy nodes ($READY_COUNT < $MIN_READY required) — aborting${NC}"
             exit 1
@@ -157,7 +166,7 @@ while [ $READY_COUNT -lt $MIN_READY ]; do
         log "${YELLOW}Continuing with $READY_COUNT available nodes${NC}"
         break
     fi
-    
+
     sleep 2
     ELAPSED=$((ELAPSED + 2))
     echo -ne "  Ready: $READY_COUNT/$NUMBER_OF_NODES nodes (need $MIN_READY)... ${ELAPSED}s\r"
@@ -331,7 +340,7 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
     SEEN_SHARDS=""
     for ((i=0; i<NUMBER_OF_NODES; i++)); do
         PORT=$((3001+i))
-        CANDIDATE=$(curl -s --max-time 10 http://localhost:$PORT/stats 2>/dev/null || echo '')
+        CANDIDATE=$(curl -s --max-time 3 http://localhost:$PORT/stats 2>/dev/null || echo '')
         if [ -z "$CANDIDATE" ] || ! echo "$CANDIDATE" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
             continue
         fi

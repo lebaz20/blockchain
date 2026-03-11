@@ -65,7 +65,7 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] Kubernetes deployment complete" | tee -a se
 # Step 4: Wait for the pods to be ready
 echo -e "${BLUE}Step 4: Waiting for pods to be ready...${NC}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waiting for all pods to be in Running state..." | tee -a server.log
-TIMEOUT=120
+TIMEOUT=600
 ELAPSED=0
 while true; do
     not_running=$(kubectl get pods -l domain=blockchain --no-headers 2>/dev/null | grep -v 'Running' | wc -l | tr -d ' ')
@@ -91,6 +91,8 @@ echo -e "${BLUE}Step 5: Setting up port forwarding...${NC}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Cleaning up any existing port forwarding..." | tee -a server.log
 pkill -f "kubectl port-forward" 2>/dev/null || true
 sleep 2
+# Raise file-descriptor limit — 512 nodes require ~1024 concurrent port-forward fds
+ulimit -n 65536 2>/dev/null || true
 for ((i=0; i<NUMBER_OF_NODES; i++)); do
   kubectl port-forward pod/p2p-server-$i $((3001+i)):$((3001+i)) > /dev/null 2>&1 &
 done
