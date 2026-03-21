@@ -91,7 +91,10 @@ class Coreserver {
     return shardStatusMap
   }
 
-  // Find best candidate shard for faulty shard redirection
+  // Find best candidate shard for faulty shard redirection.
+  // over_utilized shards are excluded: redirecting to them would flood an already-saturated
+  // shard, causing view-change storms and reducing total throughput. Broken shards hold
+  // transactions locally until an under_utilized or normal candidate is available.
   findRedirectCandidate(assignedIndices, shardStatusMap) {
     const candidateSets = [
       {
@@ -101,10 +104,6 @@ class Coreserver {
       {
         shards: shardStatusMap[SHARD_STATUS.normal] || [],
         status: SHARD_STATUS.normal
-      },
-      {
-        shards: shardStatusMap[SHARD_STATUS.over_utilized] || [],
-        status: SHARD_STATUS.over_utilized
       }
     ]
 
@@ -118,34 +117,45 @@ class Coreserver {
     return null
   }
 
-  // Build faulty shard redirect assignment mapping
+  // Build faulty shard redirect assignment mapping.
+  // Each faulty shard always gets an entry: either a redirect target or null meaning
+  // no viable candidate exists right now (applyRedirectConfiguration will clear the URL
+  // so the broken shard buffers locally until capacity opens up).
+  //
+  // Multiple broken shards may map to the same healthy shard — the TRANSACTION_THRESHOLD
+  // batch cap in the drain timer prevents flooding, so the old one-to-one dedup was an
+  // artificial constraint that left some broken shards with no URL at all.
   buildFaultyShardRedirectAssignment(faultyShards, shardStatusMap) {
-    const assignedIndices = new Set()
     const faultyShardRedirectAssignment = {}
 
     faultyShards.forEach((faultyShardIndex) => {
-      const result = this.findRedirectCandidate(assignedIndices, shardStatusMap)
+      // Pass an empty Set so every broken shard independently picks from all healthy shards.
+      const result = this.findRedirectCandidate(new Set(), shardStatusMap)
       if (result) {
-        assignedIndices.add(result.selected)
-        faultyShardRedirectAssignment[faultyShardIndex] = {
-          redirectSubset: result.selected,
-          status: result.status
-        }
+        faultyShardRedirectAssignment[faultyShardIndex] = { redirectSubset: result.selected }
+      } else {
+        // No viable candidate — will clear redirect URL so broken shard holds TX locally
+        faultyShardRedirectAssignment[faultyShardIndex] = { redirectSubset: null }
       }
     })
 
     return faultyShardRedirectAssignment
   }
 
-  // Apply redirect configuration to faulty shards
+  // Apply redirect configuration to faulty shards.
+  // When no candidate is available (redirectSubset === null), clears the URL so the
+  // broken shard buffers locally rather than flooding a saturated target.
   applyRedirectConfiguration(faultyShardRedirectAssignment) {
     Object.entries(faultyShardRedirectAssignment).forEach(
       ([faultyShardIndex, { redirectSubset }]) => {
-        let redirectUrls = []
-        if (this.sockets[redirectSubset]) {
-          redirectUrls = Object.values(this.sockets[redirectSubset]).map((object) => object.url)
-          const config = [{ key: 'REDIRECT_TO_URL', value: redirectUrls }]
-          this.updateConfig(config, faultyShardIndex)
+        if (redirectSubset && this.sockets[redirectSubset]) {
+          const redirectUrls = Object.values(this.sockets[redirectSubset]).map(
+            (object) => object.url
+          )
+          this.updateConfig([{ key: 'REDIRECT_TO_URL', value: redirectUrls }], faultyShardIndex)
+        } else {
+          // No healthy candidate right now — clear redirect URL
+          this.updateConfig([{ key: 'REDIRECT_TO_URL', value: [] }], faultyShardIndex)
         }
       }
     )

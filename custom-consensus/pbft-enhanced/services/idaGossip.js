@@ -178,7 +178,7 @@ class IDAGossip {
         }
       }
     }
-    const randomPeers = shouldGossip ? peers.sort(() => 0.5 - Math.random()).slice(0, 4) : peers
+    const randomPeers = shouldGossip ? peers.sort(() => 0.5 - Math.random()).slice(0, 10) : peers
 
     const requests = randomPeers.map((peer) => {
       const messageToSend = {

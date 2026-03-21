@@ -10,9 +10,15 @@
 #   --aws-access-key     AWS_ACCESS_KEY_ID          (or set env var)
 #   --aws-secret-key     AWS_SECRET_ACCESS_KEY      (or set env var)
 #   --aws-region         AWS region  [default: us-east-1]
-#   --instance-type      EC2 type    [default: c6i.32xlarge  — 128 vCPU, 256 GiB]
-#   --nodes              NUMBER_OF_NODES            [default: 512]
-#   --faulty             NUMBER_OF_FAULTY_NODES     [default: 85]
+#   --instance-type      EC2 type    [default: auto-selected by --nodes]
+#                        Auto-defaults:  ≤16 → c6i.xlarge (4 vCPU)
+#                                       ≤32 → c6i.2xlarge (8 vCPU)
+#                                       ≤64 → c6i.4xlarge (16 vCPU)
+#                                      ≤128 → c6i.8xlarge (32 vCPU)
+#                                      ≤256 → c6i.16xlarge (64 vCPU)
+#                                       >256 → c6i.32xlarge (128 vCPU)
+#   --nodes              NUMBER_OF_NODES            [default: 24]
+#   --faulty             NUMBER_OF_FAULTY_NODES     [default: floor((nodes-1)/3)]
 #   --key-name           Existing EC2 key pair name (optional; one is created
 #                        automatically if omitted and deleted on cleanup)
 #   --on-demand          Use On-Demand pricing instead of Spot (Spot is default; ~70% cheaper)
@@ -37,9 +43,9 @@ err()  { log "${RED}✗ $*${NC}"; }
 
 # ─── defaults ────────────────────────────────────────────────────────────────
 AWS_REGION="${AWS_REGION:-us-east-1}"
-INSTANCE_TYPE="${INSTANCE_TYPE:-c6i.32xlarge}"
-NUMBER_OF_NODES="${NUMBER_OF_NODES:-512}"
-NUMBER_OF_FAULTY_NODES="${NUMBER_OF_FAULTY_NODES:-85}"
+INSTANCE_TYPE="${INSTANCE_TYPE:-}"   # empty = auto-select by node count
+NUMBER_OF_NODES="${NUMBER_OF_NODES:-24}"
+NUMBER_OF_FAULTY_NODES="${NUMBER_OF_FAULTY_NODES:-}"
 USE_SPOT=true
 KEEP_INSTANCE=false
 SKIP_UPLOAD=false
@@ -73,6 +79,25 @@ while [[ $# -gt 0 ]]; do
 done
 
 export AWS_DEFAULT_REGION="$AWS_REGION"
+
+# ─── auto-derive faulty nodes: floor((n-1)/3) ─ standard PBFT safety bound ───
+if [[ -z "$NUMBER_OF_FAULTY_NODES" ]]; then
+    NUMBER_OF_FAULTY_NODES=$(( (NUMBER_OF_NODES - 1) / 3 ))
+fi
+
+# ─── auto-select instance type by node count ─────────────────────────────────
+# Each node runs as a K8s pod. Rough sizing: ~0.25 vCPU + ~256 MiB per node,
+# plus headroom for k3s, JMeter, Docker, and OS. The mapping below keeps at
+# least 2× headroom so CPU throttling doesn't distort benchmark results.
+if [[ -z "$INSTANCE_TYPE" ]]; then
+    if   (( NUMBER_OF_NODES <= 16  )); then INSTANCE_TYPE="c6i.xlarge"    # 4 vCPU, 8 GiB
+    elif (( NUMBER_OF_NODES <= 32  )); then INSTANCE_TYPE="c6i.2xlarge"   # 8 vCPU, 16 GiB
+    elif (( NUMBER_OF_NODES <= 64  )); then INSTANCE_TYPE="c6i.4xlarge"   # 16 vCPU, 32 GiB
+    elif (( NUMBER_OF_NODES <= 128 )); then INSTANCE_TYPE="c6i.8xlarge"   # 32 vCPU, 64 GiB
+    elif (( NUMBER_OF_NODES <= 256 )); then INSTANCE_TYPE="c6i.16xlarge"  # 64 vCPU, 128 GiB
+    else                                    INSTANCE_TYPE="c6i.32xlarge"  # 128 vCPU, 256 GiB
+    fi
+fi
 
 # ─── prerequisite checks ─────────────────────────────────────────────────────
 info "Checking local prerequisites..."

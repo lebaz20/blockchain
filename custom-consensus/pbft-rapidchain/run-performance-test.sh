@@ -35,6 +35,10 @@ export CPU_LIMIT=${CPU_LIMIT:-0.2}
 JMETER_THREADS=${JMETER_THREADS:-10}
 JMETER_RAMP_UP=${JMETER_RAMP_UP:-5}
 JMETER_DURATION=${JMETER_DURATION:-90}
+# Ramp-down: last N seconds of the test window — JMeter stops sending at
+# (DURATION - RAMP_DOWN) so the blockchain can drain without new load before
+# the drain-wait phase starts. Set to 0 to disable (default: no ramp-down).
+JMETER_RAMP_DOWN=${JMETER_RAMP_DOWN:-0}
 # ConstantThroughputTimer unit is req/min; 6000 = 100 req/s
 JMETER_THROUGHPUT=${JMETER_THROUGHPUT:-6000}
 
@@ -181,9 +185,10 @@ echo
 
 # Step 3: Run JMeter test
 log "${BLUE}Step 3: Running JMeter performance test...${NC}"
-log "  Duration: ${JMETER_DURATION}s"
+log "  Duration: ${JMETER_DURATION}s (active load: $((JMETER_DURATION - JMETER_RAMP_DOWN))s + ramp-down: ${JMETER_RAMP_DOWN}s)"
 log "  Threads: ${JMETER_THREADS}"
 log "  Ramp-up: ${JMETER_RAMP_UP}s"
+log "  Ramp-down: ${JMETER_RAMP_DOWN}s"
 echo
 
 # Start port-forward watchdog (restarts any dead forwards every 3s during JMeter)
@@ -200,11 +205,18 @@ echo
 ) &
 WATCHDOG_PID=$!
 
+# Active load duration = total duration minus ramp-down quiet phase
+JMETER_ACTIVE_DURATION=$(( JMETER_DURATION - JMETER_RAMP_DOWN ))
+if [ "${JMETER_ACTIVE_DURATION}" -le 0 ]; then
+    log "${RED}✗ JMETER_RAMP_DOWN (${JMETER_RAMP_DOWN}s) must be less than JMETER_DURATION (${JMETER_DURATION}s)${NC}"
+    exit 1
+fi
+
 TEST_START_TIME=$(date +%s)
 jmeter -n -t "Test Plan.jmx" \
     -Jthreads=${JMETER_THREADS} \
     -Jrampup=${JMETER_RAMP_UP} \
-    -Jduration=${JMETER_DURATION} \
+    -Jduration=${JMETER_ACTIVE_DURATION} \
     -Jthroughput=${JMETER_THROUGHPUT} \
     -l "${RESULTS_FILE}" \
     -e -o "${RESULTS_DIR}/pbft-rapidchain-${TIMESTAMP}-report" 2>&1 | tee -a server.log
@@ -213,6 +225,13 @@ jmeter -n -t "Test Plan.jmx" \
 kill $WATCHDOG_PID 2>/dev/null || true
 
 log "${GREEN}✓ JMeter test completed${NC}"
+
+# Ramp-down quiet phase: no new transactions; blockchain completes in-flight blocks
+if [ "${JMETER_RAMP_DOWN}" -gt 0 ]; then
+    log "${YELLOW}Ramp-down: ${JMETER_RAMP_DOWN}s quiet phase (no new TXs)...${NC}"
+    sleep "${JMETER_RAMP_DOWN}"
+    log "${GREEN}✓ Ramp-down complete${NC}"
+fi
 echo
 
 # Re-establish port-forwarding before stats collection (may have died during JMeter run)
@@ -313,7 +332,8 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
     echo "JMeter Configuration:"
     echo "  - Threads: ${JMETER_THREADS}"
     echo "  - Ramp-up: ${JMETER_RAMP_UP}s"
-    echo "  - Duration: ${JMETER_DURATION}s"
+  echo "  - Ramp-down: ${JMETER_RAMP_DOWN}s"
+  echo "  - Duration: ${JMETER_DURATION}s (active: $((JMETER_DURATION - JMETER_RAMP_DOWN))s)"
     echo "  - Target Throughput: ${JMETER_THROUGHPUT} req/s"
     echo ""
     
@@ -455,7 +475,8 @@ if [ -f "${RESULTS_FILE}" ]; then
         fi
         echo "Success Rate (%),$SUCCESS_RATE"
         
-        # Calculate throughput
+        # Calculate throughput over the full test window (including ramp-down) so
+        # comparisons across runs with different ramp-down settings stay fair.
         if [ "$JMETER_DURATION" -gt 0 ]; then
             THROUGHPUT=$(echo "scale=2; $TOTAL / $JMETER_DURATION" | bc)
         else

@@ -36,10 +36,20 @@ class Blockchain {
       // every block_to_core message; the O(n) slice+reduce over all blocks was
       // doing ~90 000 iterations over a 90 s test just for stats logging.
       this._txCountCache = { [SUBSET_INDEX]: 0 } // genesis has 0 TXs
+      // Separate counters for verification transactions and blocks (tagged with
+      // _type:'verification') so stats distinguish normal client throughput from
+      // cross-shard re-validation.  Kept at the top level of each tx object
+      // (outside `input`) so the original signature inside `input` stays valid.
+      this._verificationTxCountCache = { [SUBSET_INDEX]: 0 }
+      this._normalBlockCountCache = { [SUBSET_INDEX]: 0 }
+      this._verificationBlockCountCache = { [SUBSET_INDEX]: 0 }
     } else {
       this.chain = {}
       this._blockHashSets = {}
       this._txCountCache = {}
+      this._verificationTxCountCache = {}
+      this._normalBlockCountCache = {}
+      this._verificationBlockCountCache = {}
     }
     // Track the rate of incoming blocks
     this.ratePerMin = {}
@@ -91,7 +101,21 @@ class Blockchain {
     this.chain[subsetIndex].push(block)
     // Update O(1) indices
     this._blockHashSets[subsetIndex].add(block.hash)
-    this._txCountCache[subsetIndex] = (this._txCountCache[subsetIndex] ?? 0) + block.data.length
+    // Count txs individually by type so verification txs mixed into normal blocks
+    // are still attributed correctly.  All blocks count as normal blocks since
+    // they all go through the same PBFT round.
+    if (!this._verificationTxCountCache) this._verificationTxCountCache = {}
+    if (!this._normalBlockCountCache) this._normalBlockCountCache = {}
+    if (!this._verificationBlockCountCache) this._verificationBlockCountCache = {}
+    this._normalBlockCountCache[subsetIndex] = (this._normalBlockCountCache[subsetIndex] ?? 0) + 1
+    for (const tx of block.data) {
+      if (tx?._type === 'verification') {
+        this._verificationTxCountCache[subsetIndex] =
+          (this._verificationTxCountCache[subsetIndex] ?? 0) + 1
+      } else {
+        this._txCountCache[subsetIndex] = (this._txCountCache[subsetIndex] ?? 0) + 1
+      }
+    }
     logger.log('NEW BLOCK ADDED TO CHAIN')
     return block
   }
@@ -112,11 +136,10 @@ class Blockchain {
       blockIndex = currentChainLength - 1
     }
 
-    const currentMinute = new Date().getMinutes()
     const hashCharCode =
       this.chain[SUBSET_INDEX][blockIndex].hash[HASH_FIRST_CHAR_INDEX].charCodeAt(0)
     const proposerRotationModulo = NUMBER_OF_NODES_PER_SHARD
-    const index = (hashCharCode + currentMinute + viewOffset) % proposerRotationModulo
+    const index = (hashCharCode + viewOffset) % proposerRotationModulo
 
     return {
       proposer: this.validatorList[index],
@@ -198,17 +221,29 @@ class Blockchain {
       // Subtract 1 to exclude the genesis block (always present, always has 0 transactions)
       const actualBlocksCount = Math.max(0, this.chain[subsetIndex].length - 1)
       total[subsetIndex] = {
+        // Total blocks in chain (normal + verification) minus genesis.
         blocks: actualBlocksCount,
-        // O(1) — incremented in addBlock; replaces slice(1).reduce() over every
-        // block in every chain on every call.  Enhanced's core calls getTotal()
-        // on each of the 6 shards' block_to_core events, iterating up to 300
-        // block entries before this fix.
+        // Normal client transactions only — used for Drain Rate and Effective TX Rate.
         transactions: this._txCountCache[subsetIndex] ?? 0,
+        // Verification transactions committed when acting as ring-assigned verifier.
+        // Reported separately — excluded from all primary performance metrics.
+        verificationTransactions: this._verificationTxCountCache?.[subsetIndex] ?? 0,
+        // Block-level split mirrors tx-level split; used for Avg TX per Normal Block.
+        normalBlocks: this._normalBlockCountCache?.[subsetIndex] ?? 0,
+        verificationBlocks: this._verificationBlockCountCache?.[subsetIndex] ?? 0,
         // Only this node's own pool is visible to it; report 0 for foreign shards
         // so the stats collection script does not multiply the pool size by shard count.
         unassignedTransactions:
           subsetIndex === SUBSET_INDEX
             ? (this.transactionPool?.transactions.unassigned.length ?? 0)
+            : 0,
+        // How many of those unassigned are verification (cross-shard re-validation) TXs.
+        // A non-zero value here means VTXs are piling up faster than the shard can commit them.
+        verificationUnassignedTransactions:
+          subsetIndex === SUBSET_INDEX
+            ? (this.transactionPool?.transactions.unassigned.filter(
+                (tx) => tx._type === 'verification'
+              ).length ?? 0)
             : 0
       }
     })

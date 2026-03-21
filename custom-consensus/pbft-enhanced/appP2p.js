@@ -1,6 +1,7 @@
 // Import all required models
 const express = require('express')
 const bodyParser = require('body-parser')
+const axios = require('axios')
 const config = require('./config')
 const logger = require('./utils/logger')
 const Wallet = require('./services/wallet')
@@ -14,14 +15,10 @@ const CommitPool = require('./services/pools/commit')
 const PreparePool = require('./services/pools/prepare')
 const MessagePool = require('./services/pools/message')
 const MESSAGE_TYPE = require('./constants/message')
-const ChainUtility = require('./utils/chain')
 
 const HTTP_PORT = process.env.HTTP_PORT || 3001
 const P2P_PORT = process.env.P2P_PORT || 5001
 const { NODES_SUBSET, SUBSET_INDEX } = config.get()
-
-// Count of duplicate transactions injected by this node (50% random simulation)
-let duplicatesCreated = 0
 
 // Instantiate all objects
 const app = express()
@@ -65,7 +62,6 @@ app.get('/stats', async (request, response) => {
   const stats = {
     total: blockchain.getTotal(),
     rate,
-    duplicatesCreated,
     isFaulty: IS_FAULTY
   }
   logger.log(`REQUEST STATS FOR #${SUBSET_INDEX}:`, JSON.stringify(stats))
@@ -79,81 +75,25 @@ app.get('/health', (request, response) => {
 
 // creates transactions for the sent data
 app.post('/transaction', async (request, response) => {
-  const { IS_FAULTY, REDIRECT_TO_URL, SHOULD_REDIRECT_FROM_FAULTY_NODES } = config.get()
-  const unassignedTransactions = transactionPool.transactions.unassigned
-  const hasUnassignedTransactions = unassignedTransactions && unassignedTransactions.length > 0
-  if (
-    !IS_FAULTY &&
-    SHOULD_REDIRECT_FROM_FAULTY_NODES &&
-    Array.isArray(REDIRECT_TO_URL) &&
-    REDIRECT_TO_URL.length > 0
-  ) {
-    let lastError = null
-    for (const redirectUrl of REDIRECT_TO_URL) {
-      logger.log(`Redirect from ${HTTP_PORT} to ${redirectUrl}`)
-      try {
-        await idaGossip.sendToAnotherShard({
-          message: {
-            transactions: hasUnassignedTransactions
-              ? [
-                  ...unassignedTransactions.map((transaction) => transaction.input.data),
-                  request.body
-                ]
-              : request.body
-          },
-          chunkKey: 'transactions',
-          targetsSubset: [`${redirectUrl}/transaction`]
-        })
-        if (hasUnassignedTransactions) {
-          transactionPool.transactions.unassigned = []
-        }
-        // If successful, return the response immediately
-        return response.status(200).send()
-      } catch (error) {
-        lastError = error
-        // Try next redirectUrl in the array
-        logger.warn(`Redirect to ${redirectUrl} failed:`, error)
-      }
-    }
-    // If all redirects fail, return the last error
-    return response
-      .status(lastError?.response?.status || 500)
-      .send(lastError?.message || 'All redirects failed')
-  } else {
-    try {
-      const data = request.body.transactions ? request.body.transactions : [request.body]
-      // Build all transaction batches synchronously (CPU-only: signing + dedup coin flip)
-      // before responding, so the request body is fully consumed and duplicatesCreated
-      // is incremented in the same tick.
-      const batches = data.map((item) => {
+  try {
+    const data = request.body.transactions ? request.body.transactions : [request.body]
+    // Respond immediately — defer all CPU work (signing, hashing, P2P fan-out)
+    // to after the HTTP round-trip so JMeter threads are not blocked by ECDSA crypto.
+    response.json({ ok: true })
+    setImmediate(() => {
+      for (const item of data) {
         logger.debug(`Processing transaction on ${HTTP_PORT}`, JSON.stringify(item))
         const transaction = wallet.createTransaction(item)
-        // Build the batch: always the real transaction, plus a duplicate ~50% of the time
-        // to simulate dual-shard cross-verification. Both are dispatched in a single
-        // broadcastTransactions call, saving one WebSocket message per ingested transaction.
-        const txBatch = [transaction]
-        if (Math.random() < 0.5) {
-          duplicatesCreated++
-          txBatch.push({ ...transaction, id: ChainUtility.id() })
-        }
-        return txBatch
-      })
-      // Respond immediately before the gossip/socket-write work so the HTTP
-      // round-trip is not blocked by IDA fan-out to shard peers.
-      response.json({ ok: true })
-      setImmediate(() => {
-        for (const txBatch of batches) {
-          p2pserver.parseMessage({
-            type: MESSAGE_TYPE.transactions,
-            transactions: txBatch,
-            port: P2P_PORT
-          })
-        }
-      })
-    } catch (error) {
-      logger.warn(`Transaction processing error on ${HTTP_PORT}:`, error)
-      response.json({ ok: true })
-    }
+        p2pserver.parseMessage({
+          type: MESSAGE_TYPE.transactions,
+          transactions: [transaction],
+          port: P2P_PORT
+        })
+      }
+    })
+  } catch (error) {
+    logger.warn(`Transaction processing error on ${HTTP_PORT}:`, error)
+    response.json({ ok: true })
   }
 })
 
@@ -164,22 +104,31 @@ app.post('/message', async (request, response) => {
   response.status(200).send('Ok')
 })
 
-// Proactive stuck-pool drainer: if this node holds unassigned transactions but the
-// block count hasn't moved for 60s (shard broken by too many faulty nodes), forward
-// the stuck transactions to a healthy shard's HTTP endpoint for re-processing.
-// This rescues transactions that nobody in the broken shard would otherwise confirm.
+// Proactive redirect drain: every DRAIN_INTERVAL_MS, if this shard has accumulated
+// unassigned transactions AND the core has assigned a redirect target, forward up to
+// TRANSACTION_THRESHOLD transactions to that target.
+//
+// Design:
+//   • Broken shards always buffer TX locally (no immediate redirect on receipt).
+//   • Every 500 ms the timer fires; if a redirect URL is set it forwards one batch of
+//     up to TRANSACTION_THRESHOLD TX — enough for one full block on the target shard.
+//   • If the URL is empty (all healthy shards over-utilized) TX sit in pool until
+//     a healthy shard cools down and the core re-assigns a redirect URL.
+// Net effect: at most one block's worth of extra load is added to the target per
+// drain cycle (200 TX/s capacity per broken shard vs the ~17 TX/s it receives at
+// 100 req/s load), so the backlog clears within seconds rather than accumulating.
+//
+// Jitter: each node delays its first tick by a random amount in [0, DRAIN_INTERVAL_MS)
+// so that broken-shard nodes whose Kubernetes pods start within milliseconds of each
+// other do NOT all fire simultaneously, preventing synchronized TX bursts on the
+// healthy shard that would trigger unnecessary view-change timeouts.
 {
-  let _lastDrainBlockCount = -1
-  let _stuckCycles = 0
-  // Reduced from 30 000 ms: faster drain means dead-shard transactions are rescued
-  // sooner. Combined with the lower RATE_BROADCAST_INTERVAL_MS (8 s) the
-  // worst-case rescue latency drops from 55 s to ~23 s, giving stuck transactions
-  // a much larger window within the 90 s JMeter run + drain phase.
-  const DRAIN_INTERVAL_MS = 10000
-  const DRAIN_STUCK_CYCLES = 1 // 1 × 10 s = 10 s before acting
+  const DRAIN_INTERVAL_MS = 500
+  const startupJitter = Math.floor(Math.random() * DRAIN_INTERVAL_MS)
 
-  setInterval(async () => {
-    const { IS_FAULTY, REDIRECT_TO_URL, SHOULD_REDIRECT_FROM_FAULTY_NODES } = config.get()
+  const drainOnce = async () => {
+    const { IS_FAULTY, REDIRECT_TO_URL, SHOULD_REDIRECT_FROM_FAULTY_NODES, DRAIN_BATCH_SIZE } =
+      config.get()
     if (
       IS_FAULTY ||
       !SHOULD_REDIRECT_FROM_FAULTY_NODES ||
@@ -189,42 +138,48 @@ app.post('/message', async (request, response) => {
       return
 
     const unassigned = transactionPool.transactions.unassigned
-    if (!unassigned.length) {
-      _stuckCycles = 0
-      return
-    }
+    if (!unassigned.length) return
 
-    const total = blockchain.getTotal()
-    const currentBlocks = Object.values(total).reduce((s, v) => s + (v.blocks || 0), 0)
-    if (currentBlocks !== _lastDrainBlockCount) {
-      _lastDrainBlockCount = currentBlocks
-      _stuckCycles = 0
-      return
-    }
+    const batchSize = Math.min(DRAIN_BATCH_SIZE, unassigned.length)
 
-    _stuckCycles++
-    if (_stuckCycles < DRAIN_STUCK_CYCLES) return
+    // Snapshot and remove from pool BEFORE yielding to the event loop so concurrent
+    // handlers cannot pick up the same transactions.
+    const toForward = unassigned.splice(0, batchSize)
+    toForward.forEach((t) => transactionPool.transactionIds.delete(t.id))
 
-    logger.log(`STUCK DRAIN: ${unassigned.length} stuck txs — forwarding to another shard`)
+    logger.log(
+      `REDIRECT DRAIN: forwarding ${toForward.length} txs (batch cap ${DRAIN_BATCH_SIZE}, ` +
+        `${unassigned.length} remaining)`
+    )
+
+    let forwarded = false
     for (const redirectUrl of REDIRECT_TO_URL) {
       try {
-        await idaGossip.sendToAnotherShard({
-          message: { transactions: unassigned.map((t) => t.input.data) },
-          chunkKey: 'transactions',
-          targetsSubset: [`${redirectUrl}/transaction`]
+        await axios.post(`${redirectUrl}/transaction`, {
+          transactions: toForward.map((t) => t.input.data)
         })
-        // Clean up transactionIds so these IDs don't silently block any
-        // future transaction that happens to reuse the same UUID.
-        unassigned.forEach((t) => transactionPool.transactionIds.delete(t.id))
-        transactionPool.transactions.unassigned = []
-        _stuckCycles = 0
-        logger.log(`STUCK DRAIN: forwarded successfully to ${redirectUrl}`)
+        forwarded = true
         break
       } catch (error) {
-        logger.warn(`STUCK DRAIN: redirect to ${redirectUrl} failed, trying next…`, error)
+        logger.warn(`REDIRECT DRAIN: redirect to ${redirectUrl} failed, trying next…`, error)
       }
     }
-  }, DRAIN_INTERVAL_MS)
+
+    // All redirect URLs failed — restore items so the next cycle can retry.
+    if (!forwarded) {
+      toForward.forEach((t) => transactionPool.transactionIds.add(t.id))
+      transactionPool.transactions.unassigned.unshift(...toForward)
+      logger.warn('REDIRECT DRAIN: all redirect URLs failed, restored pool for next cycle')
+    }
+  }
+
+  // Delay the first tick by a random jitter, then settle into a fixed interval.
+  // This prevents all broken-shard nodes (which start nearly simultaneously under
+  // Kubernetes) from firing their drain timers in lock-step.
+  setTimeout(() => {
+    drainOnce()
+    setInterval(drainOnce, DRAIN_INTERVAL_MS)
+  }, startupJitter)
 }
 
 // starts the app server

@@ -1,6 +1,6 @@
 # Blockchain Performance Comparison
 
-**Test Date:** 2026-03-10 03:14:30
+**Test Date:** 2026-03-11 01:37:25
 
 ## Test Configuration
 
@@ -21,39 +21,39 @@
 
 | Metric | Value | What it means |
 |--------|-------|---------------|
-| Total Samples | 12566 | Total HTTP requests JMeter sent and received a response for (all endpoints combined: `/transaction`, `/stats`, etc.) |
-| Average Response Time (ms) | 41 | Mean round-trip time for a single HTTP request from JMeter to the node and back |
+| Total Samples | 4164 | Total HTTP requests JMeter sent and received a response for (all endpoints combined: `/transaction`, `/stats`, etc.) |
+| Average Response Time (ms) | 194 | Mean round-trip time for a single HTTP request from JMeter to the node and back |
 | Success Rate (%) | 100.00 | Percentage of HTTP responses that returned a 2xx status |
-| Throughput (req/s) | 139.62 | HTTP requests per second handled by the node API layer (JMeter perspective, all endpoints) |
-| Transactions Fired by Test | 12566 | Number of those samples that were `POST /transaction` — the actual blockchain workload submitted |
-| Total Blocks Created | 47 | Blocks appended to the blockchain during the entire test + drain window |
-| Transactions in Blocks | 4756 | Real (non-duplicate) transactions confirmed on-chain; duplicate injections are excluded from this count |
-| Unassigned Transactions | 5575 | Real transactions still waiting in the memory pool when the drain timeout expired — **never confirmed** |
-| Avg Transactions per Block | 101.19 | `Transactions in Blocks ÷ Total Blocks Created` — computed on real transactions only |
-| Total Test Elapsed (s) | 228 | Wall-clock seconds from test start until the pool drained to 0 (or stalled) — includes JMeter run + drain wait |
-| Blockchain TX Rate (tx/s) | 20.85 | `Real Transactions in Blocks ÷ Total Test Elapsed` |
-| Drain Rate (%) | 37.84 | `Real Transactions in Blocks ÷ Transactions Fired × 100` |
-| Effective TX Rate (tx/s) | 7.89 | `Blockchain TX Rate × Drain Fraction` = `TX²  ÷ (Fired × Elapsed)` — penalises leaving txs unconfirmed |
+| Throughput (req/s) | 46.26 | HTTP requests per second handled by the node API layer (JMeter perspective, all endpoints) |
+| Transactions Fired by Test | 4164 | Number of those samples that were `POST /transaction` — the actual blockchain workload submitted |
+| Total Blocks Created | 11 | Blocks appended to the blockchain during the entire test + drain window |
+| Transactions in Blocks | 688 | Real (non-duplicate) transactions confirmed on-chain; duplicate injections are excluded from this count |
+| Unassigned Transactions | 2739 | Real transactions still waiting in the memory pool when the drain timeout expired — **never confirmed** |
+| Avg Transactions per Block | 62.54 | `Transactions in Blocks ÷ Total Blocks Created` — computed on real transactions only |
+| Total Test Elapsed (s) | 205 | Wall-clock seconds from test start until the pool drained to 0 (or stalled) — includes JMeter run + drain wait |
+| Blockchain TX Rate (tx/s) | 3.35 | `Real Transactions in Blocks ÷ Total Test Elapsed` |
+| Drain Rate (%) | 16.52 | `Real Transactions in Blocks ÷ Transactions Fired × 100` |
+| Effective TX Rate (tx/s) | .55 | `Blockchain TX Rate × Drain Fraction` = `TX²  ÷ (Fired × Elapsed)` — penalises leaving txs unconfirmed |
 
-> **Duplicate injection:** 4561 duplicate transactions were injected by Enhanced nodes (50% probability per transaction) to simulate dual-shard verification. All TX metrics above are corrected to reflect **real transactions only** using the formula `real = raw × fired / (fired + duplicates)`. (**warning:** only 17/24 nodes responded — duplicate count may be understated)
+> **Duplicate injection:** 1488 duplicate transactions were injected by Enhanced nodes (50% probability per transaction) to simulate dual-shard verification. All TX metrics above are corrected to reflect **real transactions only** using the formula `real = raw × fired / (fired + duplicates)`. (**warning:** only 17/24 nodes responded — duplicate count may be understated)
 
 ### PBFT-RapidChain (Committee-Based)
 
 | Metric | Value | What it means |
 |--------|-------|---------------|
-| Total Samples | 15187 | Total HTTP requests JMeter sent and received a response for (all endpoints combined: `/transaction`, `/stats`, etc.) |
-| Average Response Time (ms) | 24 | Mean round-trip time for a single HTTP request from JMeter to the node and back |
-| Success Rate (%) | 85.01 | Percentage of HTTP responses that returned a 2xx status |
-| Throughput (req/s) | 168.74 | HTTP requests per second handled by the node API layer (JMeter perspective, all endpoints) |
-| Transactions Fired by Test | 15187 | Number of those samples that were `POST /transaction` — the actual blockchain workload submitted |
-| Total Blocks Created | 19 | Blocks committed across all shards |
-| Transactions in Blocks | 1900 | Unique transactions confirmed on-chain across all shards |
-| Unassigned Transactions | 5491 | Transactions still in shard memory pools at the end — **never confirmed** |
+| Total Samples | 6930 | Total HTTP requests JMeter sent and received a response for (all endpoints combined: `/transaction`, `/stats`, etc.) |
+| Average Response Time (ms) | 108 | Mean round-trip time for a single HTTP request from JMeter to the node and back |
+| Success Rate (%) | 85.72 | Percentage of HTTP responses that returned a 2xx status |
+| Throughput (req/s) | 77.00 | HTTP requests per second handled by the node API layer (JMeter perspective, all endpoints) |
+| Transactions Fired by Test | 6930 | Number of those samples that were `POST /transaction` — the actual blockchain workload submitted |
+| Total Blocks Created | 22 | Blocks committed across all shards |
+| Transactions in Blocks | 2200 | Unique transactions confirmed on-chain across all shards |
+| Unassigned Transactions | 2309 | Transactions still in shard memory pools at the end — **never confirmed** |
 | Avg Transactions per Block | 100.00 | `Transactions in Blocks ÷ Total Blocks Created` |
-| Total Test Elapsed (s) | 209 | Wall-clock seconds from test start until drain stalled |
-| Blockchain TX Rate (tx/s) | 9.09 | `Transactions in Blocks ÷ Total Test Elapsed` — raw number can be **misleading** (see below) |
-| Drain Rate (%) | 12.51 | `Transactions in Blocks ÷ Transactions Fired × 100` — how much of what was submitted actually got confirmed |
-| Effective TX Rate (tx/s) | 1.13 | `TX² ÷ (Fired × Elapsed)` — corrects for input volume differences between the two runs |
+| Total Test Elapsed (s) | 202 | Wall-clock seconds from test start until drain stalled |
+| Blockchain TX Rate (tx/s) | 10.89 | `Transactions in Blocks ÷ Total Test Elapsed` — raw number can be **misleading** (see below) |
+| Drain Rate (%) | 31.74 | `Transactions in Blocks ÷ Transactions Fired × 100` — how much of what was submitted actually got confirmed |
+| Effective TX Rate (tx/s) | 3.45 | `TX² ÷ (Fired × Elapsed)` — corrects for input volume differences between the two runs |
 
 ---
 
@@ -69,8 +69,8 @@ Effective TX Rate = TX_IN_BLOCKS² / (TRANSACTIONS_FIRED × TOTAL_ELAPSED)
 
 | | Fired | Confirmed | Drain % | Raw TX Rate | Effective TX Rate |
 |---|---|---|---|---|---|
-| **PBFT-Enhanced** | 12566 | 4756 | **~37.84%** | 20.85 tx/s | **~7.89 tx/s** |
-| **PBFT-RapidChain** | 15187 | 1900 | **~12.51%** | 9.09 tx/s | **~1.13 tx/s** |
+| **PBFT-Enhanced** | 4164 | 688 | **~16.52%** | 3.35 tx/s | **~.55 tx/s** |
+| **PBFT-RapidChain** | 6930 | 2200 | **~31.74%** | 10.89 tx/s | **~3.45 tx/s** |
 
 See the Detailed Comparison and Effective TX Rate rows above for the run-specific verdict.
 
@@ -80,16 +80,16 @@ See the Detailed Comparison and Effective TX Rate rows above for the run-specifi
 
 | Metric | PBFT-Enhanced | PBFT-RapidChain | Winner |
 |--------|---------------|-----------------|--------|
-| Throughput (req/s) ¹ | 139.62 | 168.74 | **RapidChain** 🏆 |
-| Avg Response Time (ms) ² | 41 | 24 | **RapidChain** 🏆 |
-| Success Rate (%) ³ | 100.00 | 85.01 | **Enhanced** 🏆 |
-| Blocks Created | 47 | 19 | **Enhanced** 🏆 |
-| Transactions in Blocks ⁴ | 4756 | 1900 | **Enhanced** 🏆 |
-| Avg TX per Block | 101.19 | 100.00 | **Enhanced** 🏆 |
-| Blockchain TX Rate (tx/s) ⁵ | 20.85 | 9.09 | _(see Effective TX Rate)_ |
-| Drain Rate (%) ⁶ | 37.84 | 12.51 | **Enhanced** 🏆 |
-| Effective TX Rate (tx/s) ⁷ | 7.89 | 1.13 | **Enhanced** 🏆 |
-| Total Test Elapsed (s) ⁸ | 228 | 209 | _(lower = faster drain)_ |
+| Throughput (req/s) ¹ | 46.26 | 77.00 | **RapidChain** 🏆 |
+| Avg Response Time (ms) ² | 194 | 108 | **RapidChain** 🏆 |
+| Success Rate (%) ³ | 100.00 | 85.72 | **Enhanced** 🏆 |
+| Blocks Created | 11 | 22 | **RapidChain** 🏆 |
+| Transactions in Blocks ⁴ | 688 | 2200 | **RapidChain** 🏆 |
+| Avg TX per Block | 62.54 | 100.00 | **RapidChain** 🏆 |
+| Blockchain TX Rate (tx/s) ⁵ | 3.35 | 10.89 | _(see Effective TX Rate)_ |
+| Drain Rate (%) ⁶ | 16.52 | 31.74 | **RapidChain** 🏆 |
+| Effective TX Rate (tx/s) ⁷ | .55 | 3.45 | **RapidChain** 🏆 |
+| Total Test Elapsed (s) ⁸ | 205 | 202 | _(lower = faster drain)_ |
 
 **Footnotes:**
 
@@ -117,7 +117,7 @@ See the Detailed Comparison and Effective TX Rate rows above for the run-specifi
 
 **Strengths:**
 - 100.00% HTTP success rate
-- 37.84% drain rate (share of submitted transactions confirmed on-chain)
+- 16.52% drain rate (share of submitted transactions confirmed on-chain)
 - Single-layer consensus (no committee stage) with lower operational complexity
 
 **Characteristics:**
@@ -128,8 +128,8 @@ See the Detailed Comparison and Effective TX Rate rows above for the run-specifi
 ### PBFT-RapidChain
 
 **Strengths:**
-- 24 ms average HTTP response time
-- 12.51% drain rate (share of submitted transactions confirmed on-chain)
+- 108 ms average HTTP response time
+- 31.74% drain rate (share of submitted transactions confirmed on-chain)
 - Architecture designed for horizontal scaling via sharding
 
 **Characteristics:**
@@ -143,13 +143,12 @@ See the Detailed Comparison and Effective TX Rate rows above for the run-specifi
 
 ## Recommendation
 
-**🏆 Winner: PBFT-Enhanced**
+**🏆 Winner: PBFT-RapidChain**
 
-For 24 nodes, PBFT-Enhanced performs better overall:
-- **100.00% acceptance rate** vs RapidChain's 85.01%
-- **37.84% drain rate**
-- Higher Effective TX Rate (7.89 vs 1.13 tx/s) after correcting for input volume
-- Simpler architecture with no committee-layer pipeline stalls
+For 24 nodes, PBFT-RapidChain performs better overall:
+- Higher Effective TX Rate (3.45 vs .55 tx/s) after correcting for input volume
+- 108 ms vs 194 ms average response time
+- Architecture ready for horizontal scaling beyond this node count
 
 **When RapidChain becomes the right choice:**
 - Networks exceeding 32+ nodes where O(n²) PBFT message complexity becomes a bottleneck
@@ -160,5 +159,5 @@ For 24 nodes, PBFT-Enhanced performs better overall:
 
 ## Full Reports
 
-- **PBFT-Enhanced Summary:** `pbft-enhanced/performance-results/pbft-enhanced-20260310_030403-summary.txt`
-- **PBFT-RapidChain Summary:** `pbft-rapidchain/performance-results/pbft-rapidchain-20260310_030938-summary.txt`
+- **PBFT-Enhanced Summary:** `pbft-enhanced/performance-results/pbft-enhanced-20260311_012737-summary.txt`
+- **PBFT-RapidChain Summary:** `pbft-rapidchain/performance-results/pbft-rapidchain-20260311_013235-summary.txt`

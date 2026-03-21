@@ -70,8 +70,8 @@ class TransactionPool {
 
   // get inflight blocks
   getInflightBlocks(block = undefined) {
-    // unassigned is the only key we have in case no inbound transactions
-    let inflightBlocks = Object.keys(this.transactions)
+    // unassigned is the only permanent key — all other keys are block-hash buckets
+    let inflightBlocks = Object.keys(this.transactions).filter((k) => k !== 'unassigned')
     if (block?.hash) {
       inflightBlocks = inflightBlocks.filter((hash) => hash !== block.hash)
     }

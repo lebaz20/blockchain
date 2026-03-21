@@ -69,11 +69,20 @@ const getRandomIndicesArrays = (array) => {
     if (toTake <= 0) break
     faultyNodes.push(...shard.slice(0, toTake))
   }
-  const committeeShard = HAS_COMMITTEE_SHARD
-    ? shuffleArray(shuffledArray.filter((value) => !faultyNodes.includes(value))).slice(
-        0,
-        NUMBER_OF_NODES_PER_SHARD
+  // Identify healthy shards — those with fewer faulty nodes than the break threshold.
+  // Honest nodes inside a broken shard cannot make consensus progress, so they are
+  // poor committee members: they spend time on shard PBFT that never completes.
+  // Restricting the pool to healthy-shard honest nodes maximises committee throughput.
+  const healthyShardNodes = new Set(
+    shards
+      .filter(
+        (shard) => shard.filter((n) => faultyNodes.includes(n)).length < faultyPerShardToBreak
       )
+      .flat()
+      .filter((n) => !faultyNodes.includes(n))
+  )
+  const committeeShard = HAS_COMMITTEE_SHARD
+    ? shuffleArray([...healthyShardNodes]).slice(0, NUMBER_OF_NODES_PER_SHARD)
     : []
   return { shards, faultyNodes, committeeShard }
 }

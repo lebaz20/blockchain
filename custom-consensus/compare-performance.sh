@@ -22,11 +22,16 @@ COMPARISON_FILE="performance-comparison-${TIMESTAMP}.md"
 
 # Shared configuration — exported so BOTH sub-scripts use identical values.
 # Override any of these via env before calling this script.
-export NUMBER_OF_NODES=${NUMBER_OF_NODES:-512}
-export TRANSACTION_THRESHOLD=${TRANSACTION_THRESHOLD:-100}
-# 85 faulty nodes across 128 shards (≤1 per shard on average) — safe for both
-# 4-node shards (f=1 limit=128) and 12-node shards (f=3 limit=126).
-export NUMBER_OF_FAULTY_NODES=${NUMBER_OF_FAULTY_NODES:-85}
+# export NUMBER_OF_NODES=${NUMBER_OF_NODES:-512}
+export NUMBER_OF_NODES=${NUMBER_OF_NODES:-24}
+
+# NUMBER_OF_FAULTY_NODES: maximum faulty nodes the whole network can tolerate while
+# every PBFT quorum still succeeds — i.e. the 2f+1 honest minimum is always met.
+# Standard PBFT safety bound: f = floor((n-1)/3).
+# At this value every shard that has ≤f faulty members can still form a quorum;
+# the network as a whole needs at least n-f = 2f+1 honest nodes to make progress.
+# For 24 nodes: floor(23/3) = 7.  For 48 nodes: floor(47/3) = 15.
+export NUMBER_OF_FAULTY_NODES=${NUMBER_OF_FAULTY_NODES:-$(( (NUMBER_OF_NODES - 1) / 3 ))}
 export CPU_LIMIT=${CPU_LIMIT:-0.2}
 
 # Per-protocol shard sizes (each uses its own architecture design)
@@ -44,25 +49,79 @@ ENHANCED_REDIRECT=${ENHANCED_REDIRECT:-1}
 RAPIDCHAIN_REDIRECT=${RAPIDCHAIN_REDIRECT:-0}
 
 # Per-protocol transaction threshold
-# Lower threshold = smaller blocks more often = less memory pressure per pod = fewer OOM errors.
-# Enhanced is set to 30 (same as its standalone run-performance-test.sh default)
-# so blocks form quickly even though only 3 shards share 5-thread JMeter load.
-# RapidChain keeps 100 to stress its committee pipeline; override
-# RAPIDCHAIN_THRESHOLD if you want a balanced head-to-head comparison.
-ENHANCED_THRESHOLD=${ENHANCED_THRESHOLD:-150}
+# Both set to 100 so blocks form at the same cadence for a fair head-to-head.
+# Lower threshold = smaller blocks more often = less time waiting to fill a pool,
+# more confirmed transactions in the same JMeter window.
+ENHANCED_THRESHOLD=${ENHANCED_THRESHOLD:-100}
 RAPIDCHAIN_THRESHOLD=${RAPIDCHAIN_THRESHOLD:-100}
-export BLOCK_THRESHOLD=${BLOCK_THRESHOLD:-2}
+
+# BLOCK_THRESHOLD: RapidChain's committee fires after collecting this many shard blocks.
+# Must equal the number of healthy DATA shards (total shards minus 1 committee shard
+# minus dead shards) so the committee fires exactly once per epoch — one block per
+# healthy data shard.  Setting it higher than healthy_data causes a deadlock (committee
+# waits for blocks that will never arrive from dead shards).  Setting it lower fires
+# the committee before all healthy shards contribute, wasting committee rounds.
+#
+# RC total shards = NUMBER_OF_NODES / RAPIDCHAIN_NODES_PER_SHARD
+# RC data shards  = total shards - 1 (one shard is dedicated committee)
+# RC dead data shards = min(floor(faulty / break_threshold), data_shards)
+# BLOCK_THRESHOLD = max(1, data_shards - dead_data_shards)
+#
+# The committee is an overlay of nodes from multiple shards — NOT a separate shard.
+# All shards are data shards.
+# Examples (4-node shards, break_threshold=2):
+#   24 nodes, faulty=7: data=6, dead=3, healthy_data=3  → BLOCK_THRESHOLD=3
+#   24 nodes, faulty=3: data=6, dead=1, healthy_data=5  → BLOCK_THRESHOLD=5
+#   24 nodes, faulty=0: data=6, dead=0, healthy_data=6  → BLOCK_THRESHOLD=6
+_RC_TOTAL_SHARDS=$(( NUMBER_OF_NODES / RAPIDCHAIN_NODES_PER_SHARD ))
+_RC_DATA_SHARDS=$_RC_TOTAL_SHARDS
+_RC_FAULTY_TO_BREAK=$(( RAPIDCHAIN_NODES_PER_SHARD / 3 + 1 ))
+_RC_DEAD_DATA=$(( NUMBER_OF_FAULTY_NODES / _RC_FAULTY_TO_BREAK ))
+[ $_RC_DEAD_DATA -gt $_RC_DATA_SHARDS ] && _RC_DEAD_DATA=$_RC_DATA_SHARDS
+_RC_HEALTHY_DATA=$(( _RC_DATA_SHARDS - _RC_DEAD_DATA ))
+[ $_RC_HEALTHY_DATA -lt 1 ] && _RC_HEALTHY_DATA=1
+export BLOCK_THRESHOLD=${BLOCK_THRESHOLD:-$_RC_HEALTHY_DATA}
 
 # JMeter configuration (also exported so sub-scripts pick them up)
-export JMETER_THREADS=${JMETER_THREADS:-10}
+# Identical parameters are used for both protocols — this is the controlled variable.
 export JMETER_RAMP_UP=${JMETER_RAMP_UP:-5}
-export JMETER_DURATION=${JMETER_DURATION:-90}
-# ConstantThroughputTimer unit is req/min; calcMode=1 means this is the TOTAL
-# cap across all threads — individual threads are throttled to share it evenly.
-# 12000 = 200 req/s total → ~16.7 real tx/shard/s after dedup (÷6 shards, ×0.5)
-# → 16.7 × 3s inactivity window = ~50 tx > threshold=30 → threshold-driven blocks.
-# 10 threads sustain 200 req/s smoothly (200×34ms/1000 ≈ 6.8 concurrent, well within 10).
-export JMETER_THROUGHPUT=${JMETER_THROUGHPUT:-12000}
+export JMETER_RAMP_DOWN=${JMETER_RAMP_DOWN:-30}
+export JMETER_DURATION=${JMETER_DURATION:-100}
+
+# JMETER_THROUGHPUT: 2000 req/min per shard (total shards, not just healthy).
+#
+# This gives each shard ~2000 req/min of JMeter input. Since JMeter targets all
+# non-faulty nodes (including honest nodes in dead shards), the actual distribution
+# depends on each protocol's architecture:
+#
+# Enhanced (redirect=1): dead-shard honest nodes forward TXs to healthy shards,
+#   so ALL traffic eventually reaches consensus — healthy shards handle both their
+#   own share plus redirected dead-shard traffic. Enhanced's redirect advantage lets
+#   it confirm more of the total input.
+#
+# RapidChain (redirect=0): dead-shard honest nodes accept TXs but can never
+#   confirm them — that fraction of total traffic is permanently lost. This is the
+#   real architectural cost of not having redirect.
+#
+# The throughput is identical for both — the difference in confirmed TXs reflects
+# genuine protocol capability, not testing bias.
+#
+# Examples for 4-node shards:
+#   24 nodes → 6 shards → 12 000 req/min (200 req/s)
+#   48 nodes → 12 shards → 24 000 req/min (400 req/s)
+_NUM_SHARDS=$(( NUMBER_OF_NODES / ENHANCED_NODES_PER_SHARD ))
+export JMETER_THROUGHPUT=${JMETER_THROUGHPUT:-$(( 2000 * _NUM_SHARDS ))}
+
+# JMETER_THREADS: enough threads that the ConstantThroughputTimer cap is the actual
+# bottleneck, not thread concurrency — identical for both protocols.
+# Uses Enhanced's worst-case ~61 ms latency so RapidChain (~14 ms) is also covered.
+# Minimum threads needed = JMETER_THROUGHPUT × latency_s × safety_factor
+#   = JMETER_THROUGHPUT × (61/60000) × 2.5  ≈  JMETER_THROUGHPUT / 393
+# Integer ceiling division via (x + d - 1) / d  with d=375 (slightly conservative):
+#   6 000 req/min →  (6000 + 374) / 375 = 16 threads
+#  12 000 req/min → (12000 + 374) / 375 = 32 threads
+#   3 000 req/min →  (3000 + 374) / 375 =  8 threads
+export JMETER_THREADS=${JMETER_THREADS:-$(( (JMETER_THROUGHPUT + 374) / 375 ))}
 
 echo -e "${CYAN}========================================${NC}"
 echo -e "${CYAN}Blockchain Performance Comparison${NC}"
@@ -106,8 +165,6 @@ echo -e "${CYAN}========================================${NC}\n"
 cd pbft-enhanced
 export NUMBER_OF_NODES_PER_SHARD=$ENHANCED_NODES_PER_SHARD
 export SHOULD_REDIRECT_FROM_FAULTY_NODES=$ENHANCED_REDIRECT
-# Enhanced uses a lower threshold — its single-layer consensus can commit small
-# batches quickly without a cross-shard committee stage.
 export TRANSACTION_THRESHOLD=$ENHANCED_THRESHOLD
 ./run-performance-test.sh
 ENHANCED_STATS=$(ls -t performance-results/*-stats.csv | head -1)
@@ -172,12 +229,13 @@ ENH_FIRED=$(extract_metric "$ENH_FILE" "Transactions Fired by Test")
 ENH_BL=$(extract_metric "$ENH_FILE" "Total Blocks Created")
 ENH_TX=$(extract_metric "$ENH_FILE" "Transactions in Blocks")
 ENH_UNASSIGNED=$(extract_metric "$ENH_FILE" "Unassigned Transactions")
+ENH_VTX_UNASSIGNED=$(extract_metric "$ENH_FILE" "Verification Unassigned Transactions")
 ENH_AVG=$(extract_metric "$ENH_FILE" "Avg Transactions per Block")
 ENH_ELAPSED=$(extract_metric "$ENH_FILE" "Total Test Elapsed (s)")
 ENH_BRATE=$(extract_metric "$ENH_FILE" "Blockchain TX Rate (tx/s)")
 ENH_DRAIN=$(extract_metric "$ENH_FILE" "Drain Rate (%)")
 ENH_ERATE=$(extract_metric "$ENH_FILE" "Effective TX Rate (tx/s)")
-ENH_DUPS=$(extract_metric "$ENH_FILE" "Duplicates Created")
+ENH_VTX=$(extract_metric "$ENH_FILE" "Verification Transactions in Blocks")
 ENH_RESPONDED=$(extract_metric "$ENH_FILE" "Nodes Responded")
 
 RC_TOTAL=$(extract_metric "$RC_FILE" "Total Samples")
@@ -274,9 +332,11 @@ fi
     echo "| Number of Nodes (Enhanced) | ${ENH_NODES} | ${ENH_NODES} P2P nodes ran the PBFT-Enhanced consensus; each participates in every round of consensus voting |"
     echo "| Number of Nodes (RapidChain) | ${RC_NODES} total | Nodes split into shards of ${RC_PER_SHARD}, plus 1 committee shard for cross-shard finality |"
     echo "| Faulty Nodes (RapidChain) | ${RC_FAULTY} | Byzantine-simulated nodes that do not propose or vote in consensus |"
-    echo "| JMeter Threads | ${JMETER_THREADS:-10} | ${JMETER_THREADS:-10} concurrent virtual users sending HTTP POST \`/transaction\` requests in parallel |"
-    echo "| Test Duration | ${JMETER_DURATION:-60} s | JMeter fires transactions for ${JMETER_DURATION:-60} seconds; the clock starts after a ${JMETER_RAMP_UP:-5} s ramp-up |"
-    echo "| Ramp-up Time | ${JMETER_RAMP_UP:-5} s | JMeter linearly scales from 0 to ${JMETER_THREADS:-10} threads over the first ${JMETER_RAMP_UP:-5} seconds to avoid a cold-start spike |"
+    echo "| JMeter Threads | ${JMETER_THREADS:-16} | ${JMETER_THREADS:-16} concurrent virtual users — identical for both protocols; high enough that the ConstantThroughputTimer cap (100 req/s) is the actual bottleneck rather than thread count |"
+    echo "| Test Duration | ${JMETER_DURATION:-60} s | JMeter fires transactions for ${JMETER_DURATION:-60} seconds total; active load = $((${JMETER_DURATION:-60} - ${JMETER_RAMP_DOWN:-0})) s, ramp-down = ${JMETER_RAMP_DOWN:-0} s |"
+    echo "| Ramp-up Time | ${JMETER_RAMP_UP:-5} s | JMeter linearly scales from 0 to ${JMETER_THREADS:-16} threads over the first ${JMETER_RAMP_UP:-5} seconds to avoid a cold-start spike |"
+    echo "| Ramp-down Time | ${JMETER_RAMP_DOWN:-0} s | Last ${JMETER_RAMP_DOWN:-0} s of the test window: no new transactions — blockchain completes in-flight blocks before the drain wait begins |"
+    echo "| Cross-Shard Verification | Cyclic healthy-shard ring | Each healthy shard verifies the next healthy shard in the ring; dead shards are skipped automatically — verification TXs are counted separately and excluded from all performance metrics |"
     echo ""
     echo "---"
     echo ""
@@ -292,22 +352,15 @@ fi
     echo "| Throughput (req/s) | ${ENH_TP} | HTTP requests per second handled by the node API layer (JMeter perspective, all endpoints) |"
     echo "| Transactions Fired by Test | ${ENH_FIRED} | Number of those samples that were \`POST /transaction\` — the actual blockchain workload submitted |"
     echo "| Total Blocks Created | ${ENH_BL} | Blocks appended to the blockchain during the entire test + drain window |"
-    echo "| Transactions in Blocks | ${ENH_TX} | Real (non-duplicate) transactions confirmed on-chain; duplicate injections are excluded from this count |"
-    echo "| Unassigned Transactions | ${ENH_UNASSIGNED} | Real transactions still waiting in the memory pool when the drain timeout expired — **never confirmed** |"
+    echo "| Transactions in Blocks | ${ENH_TX} | Normal client transactions confirmed on-chain; counted per-tx so verification TXs mixed into the same block are still excluded |"
+    echo "| Cross-Shard Verification TX | ${ENH_VTX:-0} | Transactions from other healthy shards re-validated and committed by this shard's PBFT — excluded from Transactions in Blocks, Drain Rate, and Effective TX Rate |"
+    echo "| Unassigned Transactions | ${ENH_UNASSIGNED} | Transactions still waiting in the memory pool when the drain timeout expired — **never confirmed** (normal + verification combined) |"
+    echo "| Verification Unassigned TX | ${ENH_VTX_UNASSIGNED:-0} | Of the unassigned above: cross-shard VTXs injected but never committed — high values mean VTX blocks are not filling up fast enough |"
     echo "| Avg Transactions per Block | ${ENH_AVG:-N/A} | \`Transactions in Blocks ÷ Total Blocks Created\` — computed on real transactions only |"
     echo "| Total Test Elapsed (s) | ${ENH_ELAPSED:-N/A} | Wall-clock seconds from test start until the pool drained to 0 (or stalled) — includes JMeter run + drain wait |"
     echo "| Blockchain TX Rate (tx/s) | ${ENH_BRATE:-N/A} | \`Real Transactions in Blocks ÷ Total Test Elapsed\` |"
     echo "| Drain Rate (%) | ${ENH_DRAIN:-N/A} | \`Real Transactions in Blocks ÷ Transactions Fired × 100\` |"
     echo "| Effective TX Rate (tx/s) | ${ENH_ERATE:-N/A} | \`Blockchain TX Rate × Drain Fraction\` = \`TX²  ÷ (Fired × Elapsed)\` — penalises leaving txs unconfirmed |"
-    # Duplicate transparency note
-    if [ -n "$ENH_DUPS" ] && [ "${ENH_DUPS:-0}" -gt 0 ]; then
-        ENH_NODES_NOTE=""
-        if [ -n "$ENH_RESPONDED" ] && [ "${ENH_RESPONDED:-0}" -lt "${ENH_NODES:-24}" ]; then
-            ENH_NODES_NOTE=" (**warning:** only ${ENH_RESPONDED}/${ENH_NODES} nodes responded — duplicate count may be understated)"
-        fi
-        echo ""
-        echo "> **Duplicate injection:** ${ENH_DUPS} duplicate transactions were injected by Enhanced nodes (50% probability per transaction) to simulate dual-shard verification. All TX metrics above are corrected to reflect **real transactions only** using the formula \`real = raw × fired / (fired + duplicates)\`.${ENH_NODES_NOTE}"
-    fi
     echo ""
     echo "### PBFT-RapidChain (Committee-Based)"
     echo ""
@@ -391,6 +444,7 @@ fi
     echo "- ${ENH_SR}% HTTP success rate"
     echo "- ${ENH_DRAIN_PCT}% drain rate (share of submitted transactions confirmed on-chain)"
     echo "- Single-layer consensus (no committee stage) with lower operational complexity"
+    echo "- Cross-shard verification: each healthy shard re-validates the next healthy shard's committed blocks (cyclic ring assignment); ${ENH_VTX:-0} verification TXs committed this run"
     echo ""
     echo "**Characteristics:**"
     echo "- Sharded PBFT (${ENHANCED_NODES_PER_SHARD} nodes/shard); within each shard all nodes participate in consensus (O(n²) message complexity per shard)"

@@ -23,7 +23,18 @@ log() {
 
 # Configuration (use defaults from start.sh if not set)
 export NUMBER_OF_NODES=${NUMBER_OF_NODES:-512}
-export TRANSACTION_THRESHOLD=${TRANSACTION_THRESHOLD:-30}
+# TRANSACTION_THRESHOLD: healthy-shard block size.
+# Enhanced healthy shards receive own load (~17 TX/s) PLUS redirected TX from broken
+# shards (~34 TX/s extra with 4 faulty shards), totalling ~51 TX/s — filling a 100-TX
+# block in ~2 s. A smaller block (e.g. 50) would halve block time but double the number
+# of PBFT rounds for the same total TX, wasting CPU on message overhead. Higher block
+# sizes amortize that overhead over more confirmed transactions.
+export TRANSACTION_THRESHOLD=${TRANSACTION_THRESHOLD:-100}
+# DRAIN_BATCH_SIZE: max TX sent per redirect drain cycle (every 500 ms).
+# Defaults to 2× TRANSACTION_THRESHOLD so a broken shard can flush 2 full blocks'
+# worth in one HTTP round-trip; the healthy shard queues and forms blocks normally.
+# Automatically tracks TRANSACTION_THRESHOLD — no need to update separately.
+export DRAIN_BATCH_SIZE=${DRAIN_BATCH_SIZE:-$((TRANSACTION_THRESHOLD * 2))}
 export NUMBER_OF_FAULTY_NODES=${NUMBER_OF_FAULTY_NODES:-85}
 export NUMBER_OF_NODES_PER_SHARD=${NUMBER_OF_NODES_PER_SHARD:-4}
 export SHOULD_REDIRECT_FROM_FAULTY_NODES=${SHOULD_REDIRECT_FROM_FAULTY_NODES:-1}
@@ -33,6 +44,10 @@ export CPU_LIMIT=${CPU_LIMIT:-0.2}
 JMETER_THREADS=${JMETER_THREADS:-5}
 JMETER_RAMP_UP=${JMETER_RAMP_UP:-5}
 JMETER_DURATION=${JMETER_DURATION:-90}
+# Ramp-down: last N seconds of the test window — JMeter stops sending at
+# (DURATION - RAMP_DOWN) so the blockchain can drain without new load before
+# the drain-wait phase starts. Set to 0 to disable (default: no ramp-down).
+JMETER_RAMP_DOWN=${JMETER_RAMP_DOWN:-0}
 # ConstantThroughputTimer unit is req/min; 6000 = 100 req/s
 JMETER_THROUGHPUT=${JMETER_THROUGHPUT:-6000}
 
@@ -177,9 +192,10 @@ echo
 
 # Step 3: Run JMeter test
 log "${BLUE}Step 3: Running JMeter performance test...${NC}"
-log "  Duration: ${JMETER_DURATION}s"
+log "  Duration: ${JMETER_DURATION}s (active load: $((JMETER_DURATION - JMETER_RAMP_DOWN))s + ramp-down: ${JMETER_RAMP_DOWN}s)"
 log "  Threads: ${JMETER_THREADS}"
 log "  Ramp-up: ${JMETER_RAMP_UP}s"
+log "  Ramp-down: ${JMETER_RAMP_DOWN}s"
 echo
 
 # Start port-forward watchdog (restarts any dead forwards every 3s during JMeter)
@@ -196,11 +212,18 @@ echo
 ) &
 WATCHDOG_PID=$!
 
+# Active load duration = total duration minus ramp-down quiet phase
+JMETER_ACTIVE_DURATION=$(( JMETER_DURATION - JMETER_RAMP_DOWN ))
+if [ "${JMETER_ACTIVE_DURATION}" -le 0 ]; then
+    log "${RED}✗ JMETER_RAMP_DOWN (${JMETER_RAMP_DOWN}s) must be less than JMETER_DURATION (${JMETER_DURATION}s)${NC}"
+    exit 1
+fi
+
 TEST_START_TIME=$(date +%s)
 jmeter -n -t "Test Plan.jmx" \
     -Jthreads=${JMETER_THREADS} \
     -Jrampup=${JMETER_RAMP_UP} \
-    -Jduration=${JMETER_DURATION} \
+    -Jduration=${JMETER_ACTIVE_DURATION} \
     -Jthroughput=${JMETER_THROUGHPUT} \
     -l "${RESULTS_FILE}" \
     -e -o "${RESULTS_DIR}/pbft-enhanced-${TIMESTAMP}-report" 2>&1 | tee -a server.log
@@ -209,6 +232,13 @@ jmeter -n -t "Test Plan.jmx" \
 kill $WATCHDOG_PID 2>/dev/null || true
 
 log "${GREEN}✓ JMeter test completed${NC}"
+
+# Ramp-down quiet phase: no new transactions; blockchain completes in-flight blocks
+if [ "${JMETER_RAMP_DOWN}" -gt 0 ]; then
+    log "${YELLOW}Ramp-down: ${JMETER_RAMP_DOWN}s quiet phase (no new TXs)...${NC}"
+    sleep "${JMETER_RAMP_DOWN}"
+    log "${GREEN}✓ Ramp-down complete${NC}"
+fi
 echo
 
 # Re-establish port-forwarding before stats collection (may have died during JMeter run)
@@ -307,7 +337,8 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
     echo "JMeter Configuration:"
     echo "  - Threads: ${JMETER_THREADS}"
     echo "  - Ramp-up: ${JMETER_RAMP_UP}s"
-    echo "  - Duration: ${JMETER_DURATION}s"
+  echo "  - Ramp-down: ${JMETER_RAMP_DOWN}s"
+  echo "  - Duration: ${JMETER_DURATION}s (active: $((JMETER_DURATION - JMETER_RAMP_DOWN))s)"
     echo "  - Target Throughput: ${JMETER_THROUGHPUT} req/s"
     echo ""
     echo "Blockchain Statistics (By Shard):"
@@ -328,7 +359,8 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
     TOTAL_BLOCKS=0
     TOTAL_TX_IN_BLOCKS=0
     TOTAL_UNASSIGNED_TX=0
-    TOTAL_DUPLICATES=0
+    TOTAL_VERIFICATION_UNASSIGNED_TX=0
+    TOTAL_VERIFICATION_TX=0
     NODES_RESPONDED=0
 
     # Query ALL nodes; for each shard keep the MAXIMUM value reported by any node
@@ -348,9 +380,14 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
         if [ "$IS_NODE_FAULTY" = "true" ]; then
             continue
         fi
+        # Also skip honest nodes that belong to a broken shard (too many faulty peers
+        # for consensus to proceed). Their tx/block counts reflect a stalled shard and
+        # would inflate totals — only healthy-shard nodes contribute accurate stats.
+        SHARD_STATUS=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('rate',{}).get('shardStatus',''))" 2>/dev/null || echo '')
+        if [ "$SHARD_STATUS" = "FAULTY" ]; then
+            continue
+        fi
         NODES_RESPONDED=$((NODES_RESPONDED + 1))
-        NODE_DUPS=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('duplicatesCreated',0))" 2>/dev/null || echo 0)
-        TOTAL_DUPLICATES=$((TOTAL_DUPLICATES + ${NODE_DUPS:-0}))
 
         NODE_SHARDS=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(k) for k in d.get('total',{})]" 2>/dev/null)
         for SHARD_IDX in $NODE_SHARDS; do
@@ -363,10 +400,15 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
             SHARD_VAR=$(echo "$SHARD_IDX" | tr -cd '[:alnum:]_')
 
             BLOCKS=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['total']['$SHARD_IDX'].get('blocks',0))" 2>/dev/null || echo 0)
+            NORMAL_BLOCKS=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['total']['$SHARD_IDX'].get('normalBlocks',0))" 2>/dev/null || echo 0)
+            VERIFICATION_BLOCKS=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['total']['$SHARD_IDX'].get('verificationBlocks',0))" 2>/dev/null || echo 0)
             TX=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['total']['$SHARD_IDX'].get('transactions',0))" 2>/dev/null || echo 0)
+            VERIFICATION_TX=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['total']['$SHARD_IDX'].get('verificationTransactions',0))" 2>/dev/null || echo 0)
             UNASSIGNED=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['total']['$SHARD_IDX'].get('unassignedTransactions',0))" 2>/dev/null || echo 0)
+            VERIFICATION_UNASSIGNED=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['total']['$SHARD_IDX'].get('verificationUnassignedTransactions',0))" 2>/dev/null || echo 0)
 
-            BLOCKS=${BLOCKS:-0}; TX=${TX:-0}; UNASSIGNED=${UNASSIGNED:-0}
+            BLOCKS=${BLOCKS:-0}; NORMAL_BLOCKS=${NORMAL_BLOCKS:-0}; VERIFICATION_BLOCKS=${VERIFICATION_BLOCKS:-0}
+            TX=${TX:-0}; VERIFICATION_TX=${VERIFICATION_TX:-0}; UNASSIGNED=${UNASSIGNED:-0}; VERIFICATION_UNASSIGNED=${VERIFICATION_UNASSIGNED:-0}
 
             # Update rolling max for this shard.
             # Unassigned is tied to the node with the most blocks: that node has
@@ -374,11 +416,16 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
             # Independent MAX would pick the most-stale node's inflated pool size.
             PREV_BLOCKS=$(eval echo "\${SHARD_BLOCKS_${SHARD_VAR}:-0}")
             PREV_TX=$(eval echo "\${SHARD_TX_${SHARD_VAR}:-0}")
+            PREV_VTX=$(eval echo "\${SHARD_VERIFICATION_TX_${SHARD_VAR}:-0}")
             if [ "$BLOCKS" -gt "$PREV_BLOCKS" ]; then
                 eval "SHARD_BLOCKS_${SHARD_VAR}=$BLOCKS"
+                eval "SHARD_NORMAL_BLOCKS_${SHARD_VAR}=$NORMAL_BLOCKS"
+                eval "SHARD_VERIFICATION_BLOCKS_${SHARD_VAR}=$VERIFICATION_BLOCKS"
                 eval "SHARD_UNASSIGNED_${SHARD_VAR}=$UNASSIGNED"
+                eval "SHARD_VERIFICATION_UNASSIGNED_${SHARD_VAR}=$VERIFICATION_UNASSIGNED"
             fi
             [ "$TX" -gt "$PREV_TX" ] && eval "SHARD_TX_${SHARD_VAR}=$TX"
+            [ "$VERIFICATION_TX" -gt "$PREV_VTX" ] && eval "SHARD_VERIFICATION_TX_${SHARD_VAR}=$VERIFICATION_TX"
         done
     done
 
@@ -386,19 +433,28 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
     for SHARD_IDX in $SEEN_SHARDS; do
         SHARD_VAR=$(echo "$SHARD_IDX" | tr -cd '[:alnum:]_')
         BLOCKS=$(eval echo "\${SHARD_BLOCKS_${SHARD_VAR}:-0}")
+        NORMAL_BLOCKS=$(eval echo "\${SHARD_NORMAL_BLOCKS_${SHARD_VAR}:-0}")
+        VERIFICATION_BLOCKS=$(eval echo "\${SHARD_VERIFICATION_BLOCKS_${SHARD_VAR}:-0}")
         TX=$(eval echo "\${SHARD_TX_${SHARD_VAR}:-0}")
+        VERIFICATION_TX=$(eval echo "\${SHARD_VERIFICATION_TX_${SHARD_VAR}:-0}")
         UNASSIGNED=$(eval echo "\${SHARD_UNASSIGNED_${SHARD_VAR}:-0}")
+        VERIFICATION_UNASSIGNED=$(eval echo "\${SHARD_VERIFICATION_UNASSIGNED_${SHARD_VAR}:-0}")
 
         echo ""
         echo "Shard $SHARD_IDX (max across shard nodes):"
         echo "----------------------------------------"
-        echo "  Blocks Created: $BLOCKS"
-        echo "  Transactions in Blocks: $TX"
+        echo "  Normal Blocks Created: $NORMAL_BLOCKS"
+        echo "  Verification Blocks Created: $VERIFICATION_BLOCKS"
+        echo "  Normal Transactions in Blocks: $TX"
+        echo "  Verification Transactions in Blocks: $VERIFICATION_TX"
         echo "  Unassigned Transactions: $UNASSIGNED"
+        echo "  Verification Unassigned Transactions: $VERIFICATION_UNASSIGNED"
 
-        TOTAL_BLOCKS=$((TOTAL_BLOCKS + BLOCKS))
+        TOTAL_BLOCKS=$((TOTAL_BLOCKS + NORMAL_BLOCKS))
         TOTAL_TX_IN_BLOCKS=$((TOTAL_TX_IN_BLOCKS + TX))
+        TOTAL_VERIFICATION_TX=$((TOTAL_VERIFICATION_TX + VERIFICATION_TX))
         TOTAL_UNASSIGNED_TX=$((TOTAL_UNASSIGNED_TX + UNASSIGNED))
+        TOTAL_VERIFICATION_UNASSIGNED_TX=$((TOTAL_VERIFICATION_UNASSIGNED_TX + VERIFICATION_UNASSIGNED))
     done
 
     if [ -z "$SEEN_SHARDS" ]; then
@@ -410,15 +466,16 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
     echo "========================================"
     echo "TOTAL (All Shards):"
     echo "========================================"
-    echo "Total Blocks Created: $TOTAL_BLOCKS"
+    echo "Total Normal Blocks Created: $TOTAL_BLOCKS"
     echo "Total Transactions in Blocks: $TOTAL_TX_IN_BLOCKS"
+    echo "Total Verification Transactions in Blocks: $TOTAL_VERIFICATION_TX"
     echo "Total Unassigned Transactions: $TOTAL_UNASSIGNED_TX"
-    echo "Total Duplicates Created: $TOTAL_DUPLICATES"
+    echo "Total Verification Unassigned Transactions: $TOTAL_VERIFICATION_UNASSIGNED_TX"
     echo "Nodes Responded: $NODES_RESPONDED"
     echo "Nodes Total: $NUMBER_OF_NODES"
     if [ "$NODES_RESPONDED" -lt "$NUMBER_OF_NODES" ]; then
         MISSED=$(( NUMBER_OF_NODES - NODES_RESPONDED ))
-        echo "WARNING: $MISSED node(s) did not respond — duplicate count may be understated and TX correction may be imprecise"
+        echo "WARNING: $MISSED node(s) did not respond"
     fi
     echo ""
     echo "UNASSIGNED TRANSACTION REASONS:"
@@ -452,7 +509,8 @@ if [ -f "${RESULTS_FILE}" ]; then
         fi
         echo "Success Rate (%),$SUCCESS_RATE"
         
-        # Calculate throughput
+        # Calculate throughput over the full test window (including ramp-down) so
+        # comparisons across runs with different ramp-down settings stay fair.
         if [ "$JMETER_DURATION" -gt 0 ]; then
             THROUGHPUT=$(echo "scale=2; $TOTAL / $JMETER_DURATION" | bc)
         else
@@ -466,36 +524,33 @@ if [ -f "${RESULTS_FILE}" ]; then
             # requests never reach the server so the URL col (col 14) is empty for them.
             # This gives the true total fired count including failed connections.
             JMETER_FIRED=$(awk -F',' 'NR>1 && $3 ~ /HTTP Request/ {count++} END {print count+0}' "${RESULTS_FILE}")
-            BLOCKS=$(grep "Total Blocks Created:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
-            TX_IN_BLOCKS_RAW=$(grep "Total Transactions in Blocks:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
-            UNASSIGNED_RAW=$(grep "Total Unassigned Transactions:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
-            TOTAL_DUPLICATES_CREATED=$(grep "Total Duplicates Created:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
+            BLOCKS=$(grep "Total Normal Blocks Created:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
+            TX_IN_BLOCKS=$(grep "Total Transactions in Blocks:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
+            VERIFICATION_TX_IN_BLOCKS=$(grep "Total Verification Transactions in Blocks:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
+            UNASSIGNED=$(grep "Total Unassigned Transactions:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
+            VERIFICATION_UNASSIGNED=$(grep "Total Verification Unassigned Transactions:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
             BLOCKS=${BLOCKS:-0}
-            TX_IN_BLOCKS_RAW=${TX_IN_BLOCKS_RAW:-0}
-            UNASSIGNED_RAW=${UNASSIGNED_RAW:-0}
+            TX_IN_BLOCKS=${TX_IN_BLOCKS:-0}
+            VERIFICATION_TX_IN_BLOCKS=${VERIFICATION_TX_IN_BLOCKS:-0}
+            UNASSIGNED=${UNASSIGNED:-0}
+            VERIFICATION_UNASSIGNED=${VERIFICATION_UNASSIGNED:-0}
             NODES_RESPONDED_VAL=$(grep "Nodes Responded:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
             NODES_RESPONDED_VAL=${NODES_RESPONDED_VAL:-0}
 
-            # Correct TX counts to represent only real (non-duplicate) transactions.
-            # real_count = raw_count * JMETER_FIRED / (JMETER_FIRED + TOTAL_DUPLICATES_CREATED)
-            # Blocks count is unchanged — each block is a real consensus round.
-            # NOTE: if some nodes didn't respond, TOTAL_DUPLICATES_CREATED is understated
-            # and the correction is slightly imprecise (TX counts may be marginally overstated).
-            TOTAL_POOL_ENTRIES=$(( ${JMETER_FIRED:-0} + ${TOTAL_DUPLICATES_CREATED:-0} ))
-            if [ "${TOTAL_DUPLICATES_CREATED:-0}" -gt 0 ] && [ "${TOTAL_POOL_ENTRIES:-0}" -gt 0 ]; then
-                TX_IN_BLOCKS=$(echo "scale=0; ${TX_IN_BLOCKS_RAW} * ${JMETER_FIRED} / ${TOTAL_POOL_ENTRIES}" | bc)
-                UNASSIGNED=$(echo "scale=0; ${UNASSIGNED_RAW} * ${JMETER_FIRED} / ${TOTAL_POOL_ENTRIES}" | bc)
-            else
-                TX_IN_BLOCKS=${TX_IN_BLOCKS_RAW}
-                UNASSIGNED=${UNASSIGNED_RAW}
-            fi
-            
+            # No duplicate correction needed: verification transactions are tracked
+            # separately (verificationTransactions in getTotal()) and excluded from
+            # TX_IN_BLOCKS, so the raw count is already the true normal TX count.
+
             echo "Transactions Fired by Test,${JMETER_FIRED:-0}"
             echo "Total Blocks Created,${BLOCKS:-0}"
             echo "Transactions in Blocks,${TX_IN_BLOCKS}"
+            echo "Verification Transactions in Blocks,${VERIFICATION_TX_IN_BLOCKS}"
             echo "Unassigned Transactions,${UNASSIGNED}"
+            echo "Verification Unassigned Transactions,${VERIFICATION_UNASSIGNED}"
 
-            # Drain Rate: fraction of fired transactions that made it into blocks
+            # Drain Rate: fraction of fired transactions that made it into blocks.
+            # Broken-shard nodes are excluded from stats collection above, so TX_IN_BLOCKS
+            # only counts healthy-shard commits and stays within [0, 100].
             if [ "${JMETER_FIRED:-0}" -gt 0 ]; then
                 DRAIN_RATE=$(echo "scale=2; ${TX_IN_BLOCKS:-0} * 100 / ${JMETER_FIRED}" | bc)
                 echo "Drain Rate (%),${DRAIN_RATE}"
@@ -526,7 +581,6 @@ if [ -f "${RESULTS_FILE}" ]; then
         echo "Nodes Per Shard,${NUMBER_OF_NODES_PER_SHARD}"
         echo "Faulty Nodes,${NUMBER_OF_FAULTY_NODES}"
         echo "Nodes Responded,${NODES_RESPONDED_VAL:-${NUMBER_OF_NODES}}"
-        echo "Duplicates Created,${TOTAL_DUPLICATES_CREATED:-0}"
     } > "${STATS_FILE}"
     
     log "${GREEN}✓ Results parsed${NC}"

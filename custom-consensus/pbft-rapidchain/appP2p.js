@@ -78,6 +78,15 @@ app.get('/health', (request, response) => {
   response.status(200).send('Ok')
 })
 
+async function processTransactions(data) {
+  for (const item of data) {
+    logger.debug(`Processing transaction on ${HTTP_PORT}`, JSON.stringify(item))
+    const transaction = wallet.createTransaction(item)
+    p2pserver.parseMessage({ type: MESSAGE_TYPE.transaction, transaction, port: P2P_PORT })
+    p2pserver.broadcastTransaction(P2P_PORT, transaction)
+  }
+}
+
 // creates transactions for the sent data
 app.post('/transaction', async (request, response) => {
   const { IS_FAULTY, REDIRECT_TO_URL, SHOULD_REDIRECT_FROM_FAULTY_NODES } = config.get()
@@ -123,18 +132,10 @@ app.post('/transaction', async (request, response) => {
   } else {
     try {
       const data = request.body.transactions ? request.body.transactions : [request.body]
-      data.forEach((item) => {
-        logger.debug(`Processing transaction on ${HTTP_PORT}`, JSON.stringify(item))
-        const transaction = wallet.createTransaction(item)
-        // Process locally FIRST before broadcasting
-        p2pserver.parseMessage({
-          type: MESSAGE_TYPE.transaction,
-          transaction,
-          port: P2P_PORT
-        })
-        p2pserver.broadcastTransaction(P2P_PORT, transaction)
-      })
+      // Respond immediately before P2P work so HTTP round-trip is not blocked
+      // by gossip/socket-write fan-out — matches Enhanced's setImmediate pattern.
       response.json({ ok: true })
+      setImmediate(() => processTransactions(data))
     } catch (error) {
       logger.warn(`Transaction processing error on ${HTTP_PORT}:`, error)
       response.json({ ok: true })

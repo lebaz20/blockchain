@@ -115,10 +115,9 @@ class Blockchain {
       blockIndex = currentChainLength - 1
     }
 
-    const currentMinute = new Date().getMinutes()
     const hashCharCode = chainArray[blockIndex].hash[HASH_FIRST_CHAR_INDEX].charCodeAt(0)
     const proposerRotationModulo = validatorList.length
-    const index = (hashCharCode + currentMinute + viewOffset) % proposerRotationModulo
+    const index = (hashCharCode + viewOffset) % proposerRotationModulo
     return {
       proposer: validatorList[index],
       proposerIndex: nodeSubset[index]

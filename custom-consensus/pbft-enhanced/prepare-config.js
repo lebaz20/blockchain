@@ -78,11 +78,36 @@ const environmentArray = []
 // Save environmentVariables to a yml file
 const environmentFile = 'nodesEnv.yml'
 const kubeFile = 'kubeConfig.yml'
+
+// Determine which shards have enough honest nodes to reach consensus.
+// Healthy = fewer than faultyPerShardToBreak faulty nodes assigned to the shard.
+// Known at config time because adversarial placement is computed above.
+const faultyPerShardToBreak = Math.floor(NUMBER_OF_NODES_PER_SHARD / 3) + 1
+const healthySubsetIndices = nodesSubsets
+  .map((subset, i) => ({
+    i,
+    faultyCount: subset.filter((n) => faultyNodes.includes(n)).length
+  }))
+  .filter(({ faultyCount }) => faultyCount < faultyPerShardToBreak)
+  .map(({ i }) => i)
+const H = healthySubsetIndices.length
+// Cyclic partition: healthy shard at position p verifies the healthy shard at
+// position (p+1)%H. Each healthy source appears in exactly one verifier's list;
+// dead shards get an empty array and are naturally never triggered at runtime.
+console.log(
+  'Healthy subset indices:',
+  healthySubsetIndices.map((i) => `SUBSET${i + 1}`)
+)
+
 nodesSubsets.forEach((nodesSubset, subsetIndex) => {
   console.log(
     'Subset PBFT nodes:',
     nodesSubset.map((index) => parseInt(index, 10) + 5001)
   )
+  const healthyPos = healthySubsetIndices.indexOf(subsetIndex)
+  const verificationSourceSubsets =
+    healthyPos === -1 || H <= 1 ? [] : [`SUBSET${healthySubsetIndices[(healthyPos + 1) % H] + 1}`]
+
   for (let index = 0; index < NUMBER_OF_NODES; index++) {
     const environmentVariables = {
       // ...process.env, // Keep existing environment variables
@@ -96,6 +121,7 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
       NUMBER_OF_NODES: NUMBER_OF_NODES,
       NODES_SUBSET: JSON.stringify(nodesSubset),
       SUBSET_INDEX: `SUBSET${subsetIndex + 1}`,
+      VERIFICATION_SOURCE_SUBSETS: JSON.stringify(verificationSourceSubsets),
       CORE: `ws://core-server:${coreServerPort}`,
       CPU_LIMIT,
       DEFAULT_TTL
