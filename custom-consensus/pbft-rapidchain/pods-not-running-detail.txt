@@ -1,0 +1,25 @@
+core-server     1/1   Terminating   0             2m48s
+p2p-server-0    1/1   Terminating   0             2m48s
+p2p-server-1    1/1   Terminating   0             2m48s
+p2p-server-10   1/1   Terminating   0             2m48s
+p2p-server-11   1/1   Terminating   0             2m48s
+p2p-server-12   1/1   Terminating   0             2m48s
+p2p-server-13   1/1   Terminating   0             2m48s
+p2p-server-14   1/1   Terminating   0             2m48s
+p2p-server-15   1/1   Terminating   0             2m48s
+p2p-server-16   1/1   Terminating   0             2m48s
+p2p-server-17   1/1   Terminating   0             2m48s
+p2p-server-18   1/1   Terminating   0             2m48s
+p2p-server-19   1/1   Terminating   0             2m48s
+p2p-server-2    1/1   Terminating   1 (84s ago)   2m48s
+p2p-server-20   1/1   Terminating   0             2m48s
+p2p-server-21   1/1   Terminating   0             2m48s
+p2p-server-22   1/1   Terminating   0             2m48s
+p2p-server-23   1/1   Terminating   0             2m48s
+p2p-server-3    1/1   Terminating   0             2m48s
+p2p-server-4    1/1   Terminating   0             2m48s
+p2p-server-5    1/1   Terminating   0             2m48s
+p2p-server-6    1/1   Terminating   0             2m48s
+p2p-server-7    1/1   Terminating   0             2m48s
+p2p-server-8    1/1   Terminating   0             2m48s
+p2p-server-9    1/1   Terminating   0             2m48s

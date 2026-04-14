@@ -48,9 +48,13 @@ class IDAGossip {
   }
 
   getSocketGossipPeers(sendersSubset, socketsKey = 'peers') {
-    return Object.keys(this.socketGossipPeers[socketsKey])
+    if (!this.socketGossipPeers) return []
+    const sockets = this.socketGossipPeers[socketsKey]
+    if (!sockets) return []
+    return Object.keys(sockets)
       .filter((port) => !sendersSubset.includes(port))
-      .map((port) => this.socketGossipPeers[socketsKey][port].socket)
+      .map((port) => sockets[port]?.socket)
+      .filter(Boolean)
   }
 
   getHTTPGossipPeers(sendersSubset) {
@@ -171,8 +175,8 @@ class IDAGossip {
             ? this.getSocketGossipPeers(sendersSubset, socketsKey)
             : targetsSubset
         } catch (error) {
-          console.error('Error getting peers for gossip:', error, message)
-          throw error
+          console.error('Error getting peers for gossip:', error.message)
+          return Promise.resolve()
         }
       }
     }

@@ -81,11 +81,27 @@ function loadConfig() {
   return config
 }
 
+// Cache config in memory to avoid sync FS reads on every get() call.
+// Invalidated on set() and on file changes (fs.watch).
+let _cachedConfig = null
+
+try {
+  fs.watch(CONFIG_PATH, () => {
+    _cachedConfig = null
+  })
+} catch {
+  /* file may not exist yet at startup */
+}
+
 module.exports = {
-  get: () => loadConfig(),
+  get: () => {
+    if (!_cachedConfig) _cachedConfig = loadConfig()
+    return _cachedConfig
+  },
   set: (key, value) => {
-    const config = loadConfig()
+    const config = _cachedConfig || loadConfig()
     config[key] = value
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    _cachedConfig = config
   }
 }

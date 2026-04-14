@@ -11,17 +11,19 @@
 #   --aws-secret-key     AWS_SECRET_ACCESS_KEY      (or set env var)
 #   --aws-region         AWS region  [default: us-east-1]
 #   --instance-type      EC2 type    [default: auto-selected by --nodes]
-#                        Auto-defaults:  ≤16 → c6i.xlarge (4 vCPU)
-#                                       ≤32 → c6i.2xlarge (8 vCPU)
-#                                       ≤64 → c6i.4xlarge (16 vCPU)
-#                                      ≤128 → c6i.8xlarge (32 vCPU)
-#                                      ≤256 → c6i.16xlarge (64 vCPU)
-#                                       >256 → c6i.32xlarge (128 vCPU)
+#                        Auto-defaults:  ≤8  → c6i.xlarge (4 vCPU)
+#                                       ≤16 → c6i.2xlarge (8 vCPU)
+#                                       ≤32 → c6i.4xlarge (16 vCPU)
+#                                       ≤64 → c6i.8xlarge (32 vCPU)
+#                                      ≤128 → c6i.16xlarge (64 vCPU)
+#                                       >128 → c6i.32xlarge (128 vCPU)
 #   --nodes              NUMBER_OF_NODES            [default: 24]
 #   --faulty             NUMBER_OF_FAULTY_NODES     [default: floor((nodes-1)/3)]
 #   --key-name           Existing EC2 key pair name (optional; one is created
 #                        automatically if omitted and deleted on cleanup)
 #   --on-demand          Use On-Demand pricing instead of Spot (Spot is default; ~70% cheaper)
+#   --merge              Enable shard merging for enhanced protocol (default)
+#   --no-merge           Disable shard merging for enhanced protocol
 #   --keep-instance      Don't terminate EC2 after test (for debugging)
 #   --skip-upload        Assume code is already on the instance (needs --instance-id)
 #   --instance-id        Reuse an existing running instance
@@ -47,6 +49,7 @@ INSTANCE_TYPE="${INSTANCE_TYPE:-}"   # empty = auto-select by node count
 NUMBER_OF_NODES="${NUMBER_OF_NODES:-24}"
 NUMBER_OF_FAULTY_NODES="${NUMBER_OF_FAULTY_NODES:-}"
 USE_SPOT=true
+ENHANCED_MERGE=1
 KEEP_INSTANCE=false
 SKIP_UPLOAD=false
 INSTANCE_ID=""
@@ -71,6 +74,8 @@ while [[ $# -gt 0 ]]; do
         --faulty)          NUMBER_OF_FAULTY_NODES="$2";           shift 2 ;;
         --key-name)        KEY_NAME="$2";                         shift 2 ;;
         --on-demand)       USE_SPOT=false;                        shift   ;;
+        --merge)           ENHANCED_MERGE=1;                      shift   ;;
+        --no-merge)        ENHANCED_MERGE=0;                      shift   ;;
         --keep-instance)   KEEP_INSTANCE=true;                    shift   ;;
         --skip-upload)     SKIP_UPLOAD=true;                      shift   ;;
         --instance-id)     INSTANCE_ID="$2";                      shift 2 ;;
@@ -86,15 +91,18 @@ if [[ -z "$NUMBER_OF_FAULTY_NODES" ]]; then
 fi
 
 # ─── auto-select instance type by node count ─────────────────────────────────
-# Each node runs as a K8s pod. Rough sizing: ~0.25 vCPU + ~256 MiB per node,
-# plus headroom for k3s, JMeter, Docker, and OS. The mapping below keeps at
-# least 2× headroom so CPU throttling doesn't distort benchmark results.
+# Each node runs as a K8s pod. Rough sizing: ~0.2 vCPU (CPU_LIMIT) + ~256 MiB per node,
+# plus headroom for k3s, core server, JMeter, Docker, and OS (~4 vCPU overhead).
+# The mapping below keeps at least 2× headroom so CPU throttling and pod scheduling
+# pressure don't distort benchmark results.
+#   Formula: need (nodes × 0.2) + 4 vCPU overhead, then 2× for headroom.
+#   64 nodes: (64×0.2)+4 = 16.8 → need ≥34 vCPU → c6i.8xlarge (32 vCPU, close enough)
 if [[ -z "$INSTANCE_TYPE" ]]; then
-    if   (( NUMBER_OF_NODES <= 16  )); then INSTANCE_TYPE="c6i.xlarge"    # 4 vCPU, 8 GiB
-    elif (( NUMBER_OF_NODES <= 32  )); then INSTANCE_TYPE="c6i.2xlarge"   # 8 vCPU, 16 GiB
-    elif (( NUMBER_OF_NODES <= 64  )); then INSTANCE_TYPE="c6i.4xlarge"   # 16 vCPU, 32 GiB
-    elif (( NUMBER_OF_NODES <= 128 )); then INSTANCE_TYPE="c6i.8xlarge"   # 32 vCPU, 64 GiB
-    elif (( NUMBER_OF_NODES <= 256 )); then INSTANCE_TYPE="c6i.16xlarge"  # 64 vCPU, 128 GiB
+    if   (( NUMBER_OF_NODES <= 8   )); then INSTANCE_TYPE="c6i.xlarge"    # 4 vCPU, 8 GiB
+    elif (( NUMBER_OF_NODES <= 16  )); then INSTANCE_TYPE="c6i.2xlarge"   # 8 vCPU, 16 GiB
+    elif (( NUMBER_OF_NODES <= 32  )); then INSTANCE_TYPE="c6i.4xlarge"   # 16 vCPU, 32 GiB
+    elif (( NUMBER_OF_NODES <= 64  )); then INSTANCE_TYPE="c6i.8xlarge"   # 32 vCPU, 64 GiB
+    elif (( NUMBER_OF_NODES <= 128 )); then INSTANCE_TYPE="c6i.16xlarge"  # 64 vCPU, 128 GiB
     else                                    INSTANCE_TYPE="c6i.32xlarge"  # 128 vCPU, 256 GiB
     fi
 fi
@@ -130,18 +138,27 @@ cleanup() {
         mkdir -p "$LOG_DIR"
         info "Downloading logs to $LOG_DIR ..."
 
-        local _SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes -i $KEY_FILE"
+        # Reuse the ControlMaster socket if it is still open (faster, avoids reconnect
+        # delays). Fall back to a direct connection if the socket is gone.
+        local _SSH_CTL_OPT=""
+        if [[ -n "${SSH_CTL:-}" && -S "${SSH_CTL:-/dev/null}" ]]; then
+            _SSH_CTL_OPT="-o ControlMaster=no -o ControlPath=${SSH_CTL}"
+        fi
+        local _SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=30 -o BatchMode=yes -i $KEY_FILE ${_SSH_CTL_OPT}"
 
         # Main comparison run log
         scp $_SSH_OPTS \
             "ec2-user@${PUBLIC_IP}:/tmp/comparison-run.log" \
             "${LOG_DIR}/comparison-run.log" 2>/dev/null || true
 
-        # server.log from each protocol (contains node/k8s output)
+        # server.log from each protocol — gzip on the remote first so transfer is fast.
+        # Without gzip a verbose rapidchain run can produce 200 MB+ (log spam).
+        # The .gz is decompressed locally so the saved file stays a plain .log.
         for _proto in pbft-enhanced pbft-rapidchain; do
-            scp $_SSH_OPTS \
-                "ec2-user@${PUBLIC_IP}:~/blockchain/custom-consensus/${_proto}/server.log" \
-                "${LOG_DIR}/${_proto}-server.log" 2>/dev/null || true
+            ssh $_SSH_OPTS "ec2-user@${PUBLIC_IP}" \
+                "gzip -c ~/blockchain/custom-consensus/${_proto}/server.log 2>/dev/null" \
+                | gunzip -c \
+                > "${LOG_DIR}/${_proto}-server.log" 2>/dev/null || true
         done
 
         # Any partial performance-results (stats CSVs, summary txts, JTL files)
@@ -165,7 +182,7 @@ cleanup() {
 
         # k3s / kubelet system journal (useful when pods fail to schedule)
         ssh $_SSH_OPTS "ec2-user@${PUBLIC_IP}" \
-            "sudo journalctl -u k3s --no-pager -n 500 2>/dev/null" \
+            "sudo journalctl -u k3s --no-pager --since '1 hour ago' 2>/dev/null | tail -10000" \
             > "${LOG_DIR}/k3s-journal.log" 2>/dev/null || true
 
         # List of non-Running pods at exit time
@@ -174,6 +191,17 @@ cleanup() {
              | grep -v Running || true" \
             > "${LOG_DIR}/pods-not-running.txt" 2>/dev/null || true
 
+        # Generated config files (nodesEnv.yml, jmeter_ports.csv, kubeConfig.yml, config.js)
+        for _proto in pbft-enhanced pbft-rapidchain; do
+            local _CFG_DIR="${LOG_DIR}/${_proto}-config"
+            mkdir -p "$_CFG_DIR"
+            for _cfg in nodesEnv.yml jmeter_ports.csv kubeConfig.yml config.js; do
+                scp $_SSH_OPTS \
+                    "ec2-user@${PUBLIC_IP}:~/blockchain/custom-consensus/${_proto}/${_cfg}" \
+                    "${_CFG_DIR}/${_cfg}" 2>/dev/null || true
+            done
+        done
+
         if [[ $exit_code -ne 0 ]]; then
             warn "Test failed — logs saved to: $LOG_DIR"
         else
@@ -181,10 +209,20 @@ cleanup() {
         fi
     fi
 
+    # Close ControlMaster socket (if it exists) so the background master exits cleanly
+    if [[ -n "${SSH_CTL:-}" && -S "${SSH_CTL:-/dev/null}" ]]; then
+        ssh -o ControlPath="$SSH_CTL" -O exit "ec2-user@${PUBLIC_IP:-localhost}" &>/dev/null || true
+    fi
+
     # Remove temp key file from disk
     if [[ -n "${KEY_FILE:-}" && -f "${KEY_FILE:-/dev/null}" ]]; then
         rm -f "$KEY_FILE"
         info "Removed local key file: $KEY_FILE"
+    fi
+
+    # Remove temp user-data file
+    if [[ -n "${USERDATA_FILE:-}" && -f "${USERDATA_FILE:-/dev/null}" ]]; then
+        rm -f "$USERDATA_FILE"
     fi
 
     if [[ "$KEEP_INSTANCE" == "true" ]]; then
@@ -286,13 +324,100 @@ SG_ID=$(aws ec2 create-security-group \
     --query 'GroupId' --output text)
 CREATED_SG=true
 
-MY_IP=$(curl -sf https://checkip.amazonaws.com || echo "0.0.0.0")
+# Try multiple IP detection endpoints; fall back to 0.0.0.0/0 (SSH still needs key auth).
+# HTTPS and TCP-22 outbound can transit different NAT paths on some ISPs, causing the
+# checkip IP to mismatch what EC2 sees for the SSH connection. 0.0.0.0/0 avoids this.
+MY_IP=$(curl -sf --max-time 5 https://checkip.amazonaws.com \
+        || curl -sf --max-time 5 https://api.ipify.org \
+        || echo "0.0.0.0")
+# Use the detected IP if it looks valid; fall back to open (0.0.0.0/0) otherwise.
+# Key-pair authentication is the real security barrier for these temp SGs.
+if [[ "$MY_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && "$MY_IP" != "0.0.0.0" ]]; then
+    SSH_CIDR="${MY_IP}/32"
+else
+    warn "Could not detect public IP — opening SSH to 0.0.0.0/0 (protected by key auth)"
+    SSH_CIDR="0.0.0.0/0"
+fi
+# Also allow IPv6 wildcard so dual-stack hosts work without additional detective work
 aws ec2 authorize-security-group-ingress \
     --group-id "$SG_ID" \
     --protocol tcp --port 22 \
-    --cidr "${MY_IP}/32" \
+    --cidr "$SSH_CIDR" \
     --region "$AWS_REGION" &>/dev/null
-ok "Security group '$SG_NAME' ($SG_ID) — SSH allowed from $MY_IP"
+# Unconditionally add IPv6 all-traffic rule so IPv6 hosts aren't blocked
+aws ec2 authorize-security-group-ingress \
+    --group-id "$SG_ID" \
+    --protocol tcp --port 22 \
+    --ipv6-cidr "::/0" \
+    --region "$AWS_REGION" &>/dev/null 2>&1 || true
+ok "Security group '$SG_NAME' ($SG_ID) — SSH allowed from $SSH_CIDR (IPv4) + ::/0 (IPv6)"
+
+# ─── generate user-data script (runs during boot, before SSH) ─────────────────
+# This overlaps system package installation with the instance boot + SSH wait,
+# saving ~60-90s of billable time that was previously spent after SSH connected.
+USERDATA_FILE="/tmp/blockchain-userdata-${TIMESTAMP}.sh"
+cat > "$USERDATA_FILE" << 'USERDATA'
+#!/bin/bash
+set -euo pipefail
+exec > /var/log/userdata.log 2>&1
+
+# ── system limits ──
+tee -a /etc/security/limits.conf > /dev/null << 'LIMITS'
+* soft nofile 1048576
+* hard nofile 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+LIMITS
+sysctl -w fs.file-max=2097152 > /dev/null
+sysctl -w fs.inotify.max_user_instances=8192 > /dev/null
+sysctl -w fs.inotify.max_user_watches=524288 > /dev/null
+sysctl -w net.netfilter.nf_conntrack_max=1048576 > /dev/null 2>&1 || true
+sysctl -w net.core.somaxconn=65535 > /dev/null
+sysctl -w net.ipv4.ip_local_port_range="6000 65535" > /dev/null
+sysctl -w kernel.pid_max=4194304 > /dev/null
+sysctl -w vm.max_map_count=262144 > /dev/null
+cat << 'SYSCTL' | tee -a /etc/sysctl.conf > /dev/null
+fs.file-max=2097152
+fs.inotify.max_user_instances=8192
+fs.inotify.max_user_watches=524288
+net.netfilter.nf_conntrack_max=1048576
+net.core.somaxconn=65535
+net.ipv4.ip_local_port_range=6000 65535
+kernel.pid_max=4194304
+vm.max_map_count=262144
+SYSCTL
+
+# ── IPVS kernel modules ──
+for mod in ip_vs ip_vs_rr ip_vs_wrr ip_vs_sh nf_conntrack; do
+    modprobe $mod 2>/dev/null || true
+done
+cat << 'MODULES' | tee /etc/modules-load.d/ipvs.conf > /dev/null
+ip_vs
+ip_vs_rr
+ip_vs_wrr
+ip_vs_sh
+nf_conntrack
+MODULES
+
+# ── DNF packages (skip full upgrade — fresh AL2023 AMI is current) ──
+dnf install -y -q git docker python3 bc jq rsync tar unzip ipvsadm
+
+# ── Node.js 20 via NodeSource ──
+curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+dnf install -y -q nodejs
+
+# ── pnpm via corepack ──
+corepack enable
+corepack prepare pnpm@latest --activate
+
+# ── Docker ──
+systemctl enable --now docker
+usermod -aG docker ec2-user
+
+# ── signal completion ──
+touch /tmp/.userdata-complete
+echo "==> User-data setup complete at $(date)"
+USERDATA
 
 # ─── launch EC2 instance ─────────────────────────────────────────────────────
 if [[ -z "$INSTANCE_ID" ]]; then
@@ -319,6 +444,7 @@ if [[ -z "$INSTANCE_ID" ]]; then
             --key-name "$KEY_NAME" \
             --security-group-ids "$SG_ID" \
             "$@" \
+            --user-data "file://${USERDATA_FILE}" \
             --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":60,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
             --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=blockchain-test-${TIMESTAMP}}]" \
             --region "$AWS_REGION" \
@@ -326,21 +452,72 @@ if [[ -z "$INSTANCE_ID" ]]; then
             --output text
     }
 
+    # Helper: get all AZs in the region, shuffle them so retries hit different AZs.
+    _get_azs() {
+        aws ec2 describe-availability-zones \
+            --region "$AWS_REGION" \
+            --query 'AvailabilityZones[?State==`available`].ZoneName' \
+            --output text | tr '\t' '\n' | sort -R
+    }
+
     INSTANCE_ID=""
     if [[ ${#SPOT_OPT[@]} -gt 0 ]]; then
-        INSTANCE_ID=$(_run_instances "${SPOT_OPT[@]}" 2>&1) || {
-            if echo "$INSTANCE_ID" | grep -q "MaxSpotInstanceCountExceeded\|SpotMaxPriceTooLow\|InsufficientCapacity"; then
-                warn "Spot quota exceeded or unavailable — falling back to On-Demand ..."
-                SPOT_OPT=()
-                INSTANCE_ID=""
-            else
-                echo "$INSTANCE_ID" >&2
-                exit 1
-            fi
-        }
+        # Try Spot across all available AZs before giving up
+        SPOT_FAILED=false
+        while IFS= read -r _AZ; do
+            info "Trying Spot launch in AZ: $_AZ ..."
+            _SPOT_OUT=$(_run_instances "${SPOT_OPT[@]}" --placement "AvailabilityZone=${_AZ}" 2>&1) && {
+                # run-instances succeeded — verify the output looks like an instance ID
+                if [[ "$_SPOT_OUT" =~ ^i- ]]; then
+                    INSTANCE_ID="$_SPOT_OUT"
+                    ok "Spot instance launched in $_AZ: $INSTANCE_ID"
+                    break
+                fi
+            } || {
+                _ERR="$_SPOT_OUT"
+                if echo "$_ERR" | grep -qE "InsufficientInstanceCapacity|InsufficientCapacity|MaxSpotInstanceCountExceeded|SpotMaxPriceTooLow|SpotCapacityNotAvailable|CapacityNotAvailable|Unsupported|no supported"; then
+                    warn "Spot capacity unavailable in $_AZ — trying next AZ ..."
+                else
+                    # Unexpected error — surface it and abort
+                    echo "$_ERR" >&2
+                    exit 1
+                fi
+            }
+        done < <(_get_azs)
+
+        if [[ -z "$INSTANCE_ID" ]]; then
+            warn "No Spot capacity available in any AZ for $INSTANCE_TYPE — falling back to On-Demand ..."
+            SPOT_OPT=()
+            SPOT_FAILED=true
+        fi
     fi
+
     if [[ -z "$INSTANCE_ID" ]]; then
-        INSTANCE_ID=$(_run_instances)
+        # On-Demand: also retry across AZs in case one AZ is out of on-demand capacity
+        for _AZ in $(_get_azs); do
+            info "Trying On-Demand launch in AZ: $_AZ ..."
+            _OD_OUT=$(_run_instances --placement "AvailabilityZone=${_AZ}" 2>&1) && {
+                if [[ "$_OD_OUT" =~ ^i- ]]; then
+                    INSTANCE_ID="$_OD_OUT"
+                    ok "On-Demand instance launched in $_AZ: $INSTANCE_ID"
+                    break
+                fi
+            } || {
+                _ERR="$_OD_OUT"
+                if echo "$_ERR" | grep -qE "InsufficientInstanceCapacity|InsufficientCapacity|CapacityNotAvailable|Unsupported|no supported"; then
+                    warn "On-Demand capacity unavailable in $_AZ — trying next AZ ..."
+                else
+                    echo "$_ERR" >&2
+                    exit 1
+                fi
+            }
+        done
+    fi
+
+    if [[ -z "$INSTANCE_ID" ]]; then
+        err "Could not launch $INSTANCE_TYPE in any AZ (Spot and On-Demand both exhausted)."
+        err "Try a different --instance-type or --aws-region, or wait for capacity to free up."
+        exit 1
     fi
 
     ok "Instance launched: $INSTANCE_ID"
@@ -359,7 +536,13 @@ PUBLIC_IP=$(aws ec2 describe-instances \
     --output text)
 ok "Public IP: $PUBLIC_IP"
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i $KEY_FILE"
+# ControlMaster=auto: the first SSH connection becomes the master; all subsequent
+# connections (parallel installs, rsync, scp) reuse the same TCP socket.
+# This avoids opening multiple simultaneous TCP connections (which triggers SYN
+# rate-limiting on some ISP/NAT devices and causes "Operation timed out" for the
+# parallel kubectl/k3s/JMeter install sessions).
+SSH_CTL="/tmp/ssh-ctl-${TIMESTAMP}"
+SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o ControlMaster=auto -o ControlPath=${SSH_CTL} -o ControlPersist=600 -i $KEY_FILE"
 SSH="ssh $SSH_OPTS ec2-user@$PUBLIC_IP"
 
 # ─── wait for SSH to be ready ────────────────────────────────────────────────
@@ -377,43 +560,29 @@ for attempt in $(seq 1 30); do
 done
 ok "SSH is ready"
 
-# ─── install system packages on the remote machine ───────────────────────────
-info "Installing system packages on EC2 (Docker, Node 20, Python3, git, bc) ..."
-$SSH 'bash -s' << 'REMOTE_INSTALL'
-set -euo pipefail
-
-# Raise open-file limits system-wide (needed for 512 kubectl port-forwards)
-sudo tee -a /etc/security/limits.conf > /dev/null << 'LIMITS'
-* soft nofile 1048576
-* hard nofile 1048576
-root soft nofile 1048576
-root hard nofile 1048576
-LIMITS
-sudo sysctl -w fs.file-max=2097152 > /dev/null
-echo "fs.file-max=2097152" | sudo tee -a /etc/sysctl.conf > /dev/null
-
-# DNF packages (skip full upgrade — fresh AL2023 AMI is already current; saves ~5-10 min of billable time)
-# Note: curl is already present as curl-minimal on AL2023; installing full curl conflicts with it
-sudo dnf install -y -q git docker python3 bc jq rsync tar unzip
-
-# Node.js 20 via NodeSource
-curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
-sudo dnf install -y -q nodejs
-
-# Yarn
-sudo npm install -g yarn --quiet
-
-# Enable & start Docker
-sudo systemctl enable --now docker
-sudo usermod -aG docker ec2-user
-
-echo "==> System packages installed"
-REMOTE_INSTALL
-ok "System packages installed"
+# ─── wait for user-data to finish (system packages install during boot) ──────
+# System packages (Docker, Node 20, pnpm, IPVS, sysctl) are installed via
+# EC2 user-data which started running during instance boot — overlapping with
+# the SSH wait above. Typically finishes before or shortly after SSH is ready.
+info "Waiting for system packages (installed via user-data during boot) ..."
+for attempt in $(seq 1 60); do
+    if $SSH "test -f /tmp/.userdata-complete" &>/dev/null 2>&1; then
+        break
+    fi
+    if [[ $attempt -eq 60 ]]; then
+        err "User-data did not complete after 5 minutes. Check /var/log/userdata.log on instance."
+        # Dump the remote log for diagnostics
+        $SSH "cat /var/log/userdata.log 2>/dev/null" || true
+        exit 1
+    fi
+    sleep 5
+    echo -ne "  Waiting for user-data... ($((attempt * 5))s)\r"
+done
+ok "System packages ready (installed during boot)"
 
 # ─── install kubectl ─────────────────────────────────────────────────────────
-info "Installing kubectl ..."
-$SSH 'bash -s' << 'REMOTE_KUBECTL'
+info "Installing kubectl, k3s, and JMeter in parallel ..."
+$SSH 'bash -s' << 'REMOTE_KUBECTL' &
 set -euo pipefail
 KUBECTL_VERSION=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
 curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
@@ -422,25 +591,56 @@ sudo mv /tmp/kubectl /usr/local/bin/kubectl
 kubectl version --client --short 2>/dev/null || kubectl version --client
 echo "==> kubectl installed"
 REMOTE_KUBECTL
-ok "kubectl installed"
+_pid_kubectl=$!
 
 # ─── install k3s (single-node Kubernetes) ────────────────────────────────────
-info "Installing k3s (single-node Kubernetes cluster) ..."
-$SSH 'bash -s' << 'REMOTE_K3S'
+$SSH 'bash -s' << 'REMOTE_K3S' &
 set -euo pipefail
+
+# Custom flannel config: default /24 per node only gives 254 pod IPs — not enough for 513 pods.
+# SubnetLen=20 gives each node a /20 = 4096 IPs, plenty for 512+ pods.
+cat << 'FLANNEL_CONF' | sudo tee /etc/k3s-flannel.json > /dev/null
+{
+    "Network": "10.42.0.0/16",
+    "EnableIPv4": true,
+    "EnableIPv6": false,
+    "SubnetLen": 20,
+    "Backend": {"Type": "host-gw"}
+}
+FLANNEL_CONF
+
 # max-pods must exceed NUMBER_OF_NODES (512) + system pods (~10).
-# The k3s default is 110 — raise it to 600 so all 512 p2p pods can be scheduled.
+# IPVS proxy mode: O(1) service lookup vs iptables O(n).
+# node-cidr-mask-size=20: must match flannel SubnetLen so controller and flannel agree.
 curl -sfL https://get.k3s.io | sh -s - \
     --disable traefik \
     --disable servicelb \
     --write-kubeconfig-mode 644 \
+    --flannel-conf=/etc/k3s-flannel.json \
+    --kube-proxy-arg=proxy-mode=ipvs \
+    --kube-proxy-arg=ipvs-scheduler=rr \
+    --kube-controller-manager-arg=node-cidr-mask-size=20 \
     --kubelet-arg=max-pods=600
 
-# Wait for k3s to be ready
+# Wait for k3s API server to be ready
 for i in $(seq 1 30); do
     if kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes &>/dev/null 2>&1; then
         break
     fi
+    sleep 5
+done
+
+# Wait for flannel to write subnet.env — pods cannot start networking until this
+# file exists. kubectl get nodes succeeds as soon as the API server is up, but
+# flannel may still be initializing. Without this wait every pod (including
+# CoreDNS and system pods) fails immediately with "no such file or directory".
+echo "Waiting for flannel subnet.env..."
+for i in $(seq 1 60); do
+    if [ -f /run/flannel/subnet.env ]; then
+        echo "==> flannel subnet.env ready"
+        break
+    fi
+    [ "$i" -eq 60 ] && echo "WARNING: flannel subnet.env not found after 5 min, continuing anyway"
     sleep 5
 done
 
@@ -450,12 +650,20 @@ sudo cp /etc/rancher/k3s/k3s.yaml /home/ec2-user/.kube/config
 sudo chown ec2-user:ec2-user /home/ec2-user/.kube/config
 echo "==> k3s installed and running"
 kubectl --kubeconfig /home/ec2-user/.kube/config get nodes
+
+# Scale CoreDNS resources: 512 pods generate heavy DNS traffic at startup.
+# Default 170Mi limit is too low — CoreDNS CrashLoopBackOff under load.
+kubectl --kubeconfig /home/ec2-user/.kube/config -n kube-system patch deployment coredns --type='json' -p='[
+  {"op": "replace", "path": "/spec/replicas", "value": 2},
+  {"op": "replace", "path": "/spec/template/spec/containers/0/resources/limits/memory", "value": "512Mi"},
+  {"op": "replace", "path": "/spec/template/spec/containers/0/resources/requests/memory", "value": "256Mi"}
+]' || true
+echo "==> CoreDNS scaled to 2 replicas with 512Mi memory"
 REMOTE_K3S
-ok "k3s installed"
+_pid_k3s=$!
 
 # ─── install Apache JMeter ───────────────────────────────────────────────────
-info "Installing Apache JMeter 5.6.3 ..."
-$SSH 'bash -s' << 'REMOTE_JMETER'
+$SSH 'bash -s' << 'REMOTE_JMETER' &
 set -euo pipefail
 # Install Java (JMeter dependency)
 sudo dnf install -y -q java-21-amazon-corretto-headless
@@ -469,7 +677,12 @@ rm /tmp/jmeter.tgz
 echo "==> JMeter installed"
 jmeter --version 2>&1 | head -3
 REMOTE_JMETER
-ok "JMeter installed"
+_pid_jmeter=$!
+
+wait $_pid_kubectl || { err "kubectl install failed"; exit 1; }
+wait $_pid_k3s     || { err "k3s install failed"; exit 1; }
+wait $_pid_jmeter  || { err "JMeter install failed"; exit 1; }
+ok "kubectl, k3s, and JMeter installed"
 
 # ─── upload project code ─────────────────────────────────────────────────────
 if [[ "$SKIP_UPLOAD" != "true" ]]; then
@@ -493,28 +706,33 @@ if [[ "$SKIP_UPLOAD" != "true" ]]; then
     rsync $RSYNC_OPTS \
         -e "ssh $SSH_OPTS" \
         "${SCRIPT_DIR}/pbft-enhanced/" \
-        "ec2-user@${PUBLIC_IP}:~/blockchain/custom-consensus/pbft-enhanced/"
+        "ec2-user@${PUBLIC_IP}:~/blockchain/custom-consensus/pbft-enhanced/" &
+    _pid_rsync_enh=$!
 
     rsync $RSYNC_OPTS \
         -e "ssh $SSH_OPTS" \
         "${SCRIPT_DIR}/pbft-rapidchain/" \
-        "ec2-user@${PUBLIC_IP}:~/blockchain/custom-consensus/pbft-rapidchain/"
+        "ec2-user@${PUBLIC_IP}:~/blockchain/custom-consensus/pbft-rapidchain/" &
+    _pid_rsync_rc=$!
 
-    # Upload compare-performance.sh
+    # Upload compare-performance.sh (while rsync finishes in background)
     scp $SSH_OPTS \
         "${SCRIPT_DIR}/compare-performance.sh" \
         "ec2-user@${PUBLIC_IP}:~/blockchain/custom-consensus/compare-performance.sh"
 
+    wait $_pid_rsync_enh || { err "rsync pbft-enhanced failed"; exit 1; }
+    wait $_pid_rsync_rc  || { err "rsync pbft-rapidchain failed"; exit 1; }
+
     ok "Code uploaded"
 
-    # Install npm/yarn dependencies on the remote
-    info "Installing Node.js dependencies on EC2 ..."
+    # Install pnpm dependencies on the remote
+    info "Installing Node.js dependencies on EC2 in parallel ..."
     $SSH 'bash -s' << 'REMOTE_DEPS'
 set -euo pipefail
-cd ~/blockchain/custom-consensus/pbft-enhanced
-HUSKY=0 yarn install --frozen-lockfile --non-interactive 2>&1 | tail -5
-cd ~/blockchain/custom-consensus/pbft-rapidchain
-HUSKY=0 yarn install --frozen-lockfile --non-interactive 2>&1 | tail -5
+pids=()
+(cd ~/blockchain/custom-consensus/pbft-enhanced   && HUSKY=0 pnpm install --frozen-lockfile) & pids+=($!)
+(cd ~/blockchain/custom-consensus/pbft-rapidchain && HUSKY=0 pnpm install --frozen-lockfile) & pids+=($!)
+for pid in "${pids[@]}"; do wait "$pid"; done
 echo "==> Node.js dependencies installed"
 REMOTE_DEPS
     ok "Dependencies installed"
@@ -526,19 +744,23 @@ info "Building Docker images on EC2 in parallel (saves ~3-5 min of billable time
 # are evaluated by the remote shell, not the local one.
 $SSH 'bash -s' << 'REMOTE_BUILD'
 set -euo pipefail
+export DOCKER_BUILDKIT=1
 # Build all 4 images concurrently — Docker daemon safely handles parallel builds
+# BuildKit enables parallel layer processing for faster builds
 pids=()
-(cd ~/blockchain/custom-consensus/pbft-enhanced   && sudo docker build -f Dockerfile.p2p  -t lebaz20/blockchain-p2p-server:latest . -q) & pids+=($!)
-(cd ~/blockchain/custom-consensus/pbft-enhanced   && sudo docker build -f Dockerfile.core -t lebaz20/blockchain-core-server:latest . -q) & pids+=($!)
-(cd ~/blockchain/custom-consensus/pbft-rapidchain && sudo docker build -f Dockerfile.p2p  -t lebaz20/blockchain-rapidchain-p2p-server:latest . -q) & pids+=($!)
-(cd ~/blockchain/custom-consensus/pbft-rapidchain && sudo docker build -f Dockerfile.core -t lebaz20/blockchain-rapidchain-core-server:latest . -q) & pids+=($!)
+(cd ~/blockchain/custom-consensus/pbft-enhanced   && sudo DOCKER_BUILDKIT=1 docker build --no-cache -f Dockerfile.p2p  -t lebaz20/blockchain-p2p-server:latest .) & pids+=($!)
+(cd ~/blockchain/custom-consensus/pbft-enhanced   && sudo DOCKER_BUILDKIT=1 docker build --no-cache -f Dockerfile.core -t lebaz20/blockchain-core-server:latest .) & pids+=($!)
+(cd ~/blockchain/custom-consensus/pbft-rapidchain && sudo DOCKER_BUILDKIT=1 docker build --no-cache -f Dockerfile.p2p  -t lebaz20/blockchain-rapidchain-p2p-server:latest .) & pids+=($!)
+(cd ~/blockchain/custom-consensus/pbft-rapidchain && sudo DOCKER_BUILDKIT=1 docker build --no-cache -f Dockerfile.core -t lebaz20/blockchain-rapidchain-core-server:latest .) & pids+=($!)
 wait "${pids[@]}"
 
-# Import into k3s containerd (sequential — each pipe needs its own stdin)
-sudo docker save lebaz20/blockchain-p2p-server:latest            | sudo k3s ctr images import -
-sudo docker save lebaz20/blockchain-core-server:latest           | sudo k3s ctr images import -
-sudo docker save lebaz20/blockchain-rapidchain-p2p-server:latest | sudo k3s ctr images import -
-sudo docker save lebaz20/blockchain-rapidchain-core-server:latest | sudo k3s ctr images import -
+# Import into k3s containerd — pipe directly (no temp files on disk)
+pids=()
+sudo docker save lebaz20/blockchain-p2p-server:latest             | sudo k3s ctr images import - & pids+=($!)
+sudo docker save lebaz20/blockchain-core-server:latest            | sudo k3s ctr images import - & pids+=($!)
+sudo docker save lebaz20/blockchain-rapidchain-p2p-server:latest  | sudo k3s ctr images import - & pids+=($!)
+sudo docker save lebaz20/blockchain-rapidchain-core-server:latest | sudo k3s ctr images import - & pids+=($!)
+for pid in "${pids[@]}"; do wait "$pid"; done
 echo "==> Docker images built and imported into k3s"
 REMOTE_BUILD
 ok "Docker images built"
@@ -574,9 +796,14 @@ cat << RUNSCRIPT | $SSH "cat > /tmp/run-test.sh"
 #!/bin/bash
 set -euo pipefail
 ulimit -n 1048576 2>/dev/null || ulimit -n 65536 2>/dev/null || true
+# Ensure inotify limits are raised for this session (kubectl port-forward)
+sudo sysctl -w fs.inotify.max_user_instances=8192 2>/dev/null || true
+sudo sysctl -w fs.inotify.max_user_watches=524288 2>/dev/null || true
 export KUBECONFIG=/home/ec2-user/.kube/config
 export NUMBER_OF_NODES=${NUMBER_OF_NODES}
 export NUMBER_OF_FAULTY_NODES=${NUMBER_OF_FAULTY_NODES}
+export ENHANCED_MERGE=${ENHANCED_MERGE}
+export USE_HOST_NETWORK=true
 export PATH=\$PATH:/usr/local/bin
 cd ~/blockchain/custom-consensus
 chmod +x compare-performance.sh \\
@@ -586,8 +813,15 @@ chmod +x compare-performance.sh \\
 RUNSCRIPT
 
 $SSH "chmod +x /tmp/run-test.sh"
-# -t allocates a pty so output is line-buffered and streams live to your terminal
-$SSH -t "/tmp/run-test.sh"
+# -t allocates a pty so output is line-buffered and streams live to your terminal.
+# The SSH -t session may return non-zero when the ControlMaster socket closes even
+# if the remote command succeeded. Capture the exit code explicitly so set -e
+# doesn't abort the script before the summary/cleanup phase.
+_ssh_exit=0
+$SSH -t "/tmp/run-test.sh" || _ssh_exit=$?
+if [[ $_ssh_exit -ne 0 ]]; then
+    warn "SSH session exited with code $_ssh_exit (may be benign — ControlMaster close)"
+fi
 ok "Comparison test completed"
 
 # ─── print summary ────────────────────────────────────────────────────────────

@@ -30,21 +30,26 @@ class Coreserver {
         : parsedUrl.searchParams.get('subsetIndex')
       const port = parsedUrl.searchParams.get('port')
       const httpPort = parsedUrl.searchParams.get('httpPort')
-      this.connectSocket(socket, port, subsetIndex, httpPort)
+      // Use the pod's actual IP for redirect URLs — avoids Kubernetes DNS
+      // resolution failures that cause ENOTFOUND both locally and on AWS.
+      let remoteIp = request.socket.remoteAddress || ''
+      if (remoteIp.startsWith('::ffff:')) remoteIp = remoteIp.slice(7)
+      this.connectSocket(socket, port, subsetIndex, httpPort, remoteIp)
       this.messageHandler(socket, isCommittee)
       logger.log('core sockets', JSON.stringify(this.socketsMap))
     })
   }
 
   // connects to a given socket and registers the message handler on it
-  connectSocket(socket, port, subsetIndex, httpPort) {
+  // eslint-disable-next-line max-params
+  connectSocket(socket, port, subsetIndex, httpPort, remoteIp) {
     if (!this.sockets[subsetIndex]) {
       this.sockets[subsetIndex] = {}
       this.socketsMap[subsetIndex] = []
     }
     this.sockets[subsetIndex][port] = {
       socket,
-      url: `http://p2p-server-${Number(port) - 5001}:${httpPort}`
+      url: `http://${remoteIp}:${httpPort}`
     }
     this.socketsMap[subsetIndex].push(port)
     this.idaGossip.setNodeSockets(this.sockets)
@@ -243,7 +248,8 @@ class Coreserver {
             if (
               !this.rates[data.rate.shardIndex] ||
               this.rates[data.rate.shardIndex].transactions <
-                data.rate.transactions[data.rate.shardIndex]
+                data.rate.transactions[data.rate.shardIndex] ||
+              this.rates[data.rate.shardIndex].shardStatus !== data.rate.shardStatus
             ) {
               this.rates[data.rate.shardIndex] = {
                 transactions: data.rate.transactions?.[data.rate.shardIndex],

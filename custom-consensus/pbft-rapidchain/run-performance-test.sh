@@ -34,7 +34,7 @@ export CPU_LIMIT=${CPU_LIMIT:-0.2}
 # JMeter configuration
 JMETER_THREADS=${JMETER_THREADS:-10}
 JMETER_RAMP_UP=${JMETER_RAMP_UP:-5}
-JMETER_DURATION=${JMETER_DURATION:-90}
+JMETER_DURATION=${JMETER_DURATION:-60}
 # Ramp-down: last N seconds of the test window — JMeter stops sending at
 # (DURATION - RAMP_DOWN) so the blockchain can drain without new load before
 # the drain-wait phase starts. Set to 0 to disable (default: no ramp-down).
@@ -68,13 +68,22 @@ mkdir -p "${RESULTS_DIR}"
 cleanup() {
     log "\n${YELLOW}Cleaning up...${NC}"
     
-    # Stop port forwarding
-    log "Stopping port forwarding..."
-    pkill -f "kubectl port-forward" 2>&1 | tee -a server.log || true
+    # Capture pod states BEFORE deletion for diagnostics
+    log "Pod states at cleanup:"
+    kubectl get pods -l domain=blockchain --no-headers 2>/dev/null | awk '{print $3}' | sort | uniq -c | tee -a server.log || true
+    kubectl get pods -l domain=blockchain --no-headers 2>/dev/null | grep -v 'Running' > pods-not-running-detail.txt 2>/dev/null || true
+    
+    # Stop port forwarding and background log streaming
+    if [ "${USE_HOST_NETWORK:-}" != "true" ]; then
+        log "Stopping port forwarding..."
+        pkill -f "kubectl port-forward" 2>&1 | tee -a server.log || true
+        pkill -f "kubectl proxy" 2>&1 | tee -a server.log || true
+    fi
+    pkill -f "kubectl logs" 2>/dev/null || true
     
     # Delete Kubernetes resources
     log "Deleting Kubernetes resources..."
-    kubectl delete -f kubeConfig.yml --ignore-not-found 2>&1 | tee -a server.log || true
+    kubectl delete -f kubeConfig.yml --ignore-not-found --grace-period=1 --force 2>&1 | tee -a server.log || true
     
     log "${GREEN}Cleanup complete${NC}"
 }
@@ -84,106 +93,191 @@ trap cleanup EXIT INT TERM
 
 # Step 1: Start blockchain using existing start.sh
 log "${BLUE}Step 1: Starting blockchain (using start.sh)...${NC}"
-# Run start.sh in background and wait for port forwarding to be ready
-./start.sh 2>&1 | tee -a server.log &
-START_PID=$!
+# Run start.sh to completion so kubectl apply finishes all resources.
+# Previously ran in background and killed early when port 3001 responded,
+# but with hostNetwork the first pod responds almost immediately — while
+# kubectl is still applying the remaining hundreds of resources.
+AUTOMATED_TEST=true ./start.sh 2>&1 | tee -a server.log
 
-# Wait for port forwarding to actually work (not just be started)
-TIMEOUT=900
-ELAPSED=0
-while true; do
-    # Check if at least one port is responding
-    if curl -s -f http://localhost:3001/health > /dev/null 2>&1; then
-        break
-    fi
-    
-    if [ $ELAPSED -ge $TIMEOUT ]; then
-        log "${RED}✗ Timeout waiting for port forwarding${NC}"
-        kill $START_PID 2>/dev/null || true
-        exit 1
-    fi
-    
+# Clean up any port-forwards set up by start.sh (run-performance-test.sh
+# manages its own port-forwards with a watchdog in non-hostNetwork mode)
+if [ "${USE_HOST_NETWORK:-}" != "true" ]; then
+    pkill -f "kubectl port-forward" 2>/dev/null || true
+    pkill -f "kubectl proxy" 2>/dev/null || true
     sleep 2
-    ELAPSED=$((ELAPSED + 2))
-    echo -ne "  Waiting for port forwarding... ${ELAPSED}s\r"
-done
-
-# Kill start.sh to prevent log streaming
-kill $START_PID 2>/dev/null || true
-wait $START_PID 2>/dev/null || true
-
-# Re-establish port forwarding (start.sh's subprocess port-forwards die with it)
-pkill -f "kubectl port-forward" 2>/dev/null || true
-sleep 2
-# Raise file-descriptor limit — 512 nodes require ~1024 concurrent port-forward fds
-ulimit -n 65536 2>/dev/null || true
-for ((i=0; i<NUMBER_OF_NODES; i++)); do
-    nohup kubectl port-forward pod/p2p-server-$i $((3001+i)):$((3001+i)) >> server.log 2>&1 &
-done
-sleep 30
+fi
 
 log "${GREEN}✓ Blockchain deployed and ready${NC}"
 echo
 
-# Step 2: Wait for blockchain to stabilize
+# Step 2: Wait for ALL pods to pass readiness probes (httpGet /health).
+# Memory raised to 256Mi so pods no longer crash under the P2P connection storm.
+# Readiness probes are lenient (10s period, 5s timeout, 6 failures) to tolerate
+# busy startup without false negatives.
 log "${BLUE}Step 2: Waiting for all nodes to be ready...${NC}"
-TIMEOUT=600
+TOTAL_EXPECTED=$((NUMBER_OF_NODES))  # p2p-server pods only (core-server has no probe)
+TIMEOUT=$((NUMBER_OF_NODES * 3))
+[ $TIMEOUT -lt 600 ] && TIMEOUT=600
 ELAPSED=0
-READY_COUNT=0
-# Only require non-faulty nodes — faulty pods may crash on startup and are already
-# excluded from jmeter_ports.csv, so they won't receive traffic anyway.
-MIN_READY=$((NUMBER_OF_NODES - NUMBER_OF_FAULTY_NODES))
-[ $MIN_READY -lt 1 ] && MIN_READY=1
 
-while [ $READY_COUNT -lt $MIN_READY ]; do
-    # Run all health checks in parallel (batches of 64) to avoid sequential curl latency at scale.
-    # Each subshell writes a touch file on success; the count is the number of ready nodes.
-    HCHECK_TMP=$(mktemp -d)
-    # Track only the health-check subshell PIDs so the bare wait below does NOT block
-    # on the long-running kubectl port-forward processes also in this shell's job table.
-    _hcheck_pids=()
-    for ((i=0; i<NUMBER_OF_NODES; i++)); do
-        PORT=$((3001+i))
-        (
-            if curl -s -f --max-time 2 http://localhost:$PORT/health > /dev/null 2>&1; then
-                touch "$HCHECK_TMP/ok_$i"
-            else
-                if ! pgrep -f "port-forward pod/p2p-server-$i $PORT" > /dev/null 2>&1; then
-                    nohup kubectl port-forward pod/p2p-server-$i $PORT:$PORT >> server.log 2>&1 &
-                fi
-            fi
-        ) &
-        _hcheck_pids+=($!)
-        # Throttle: flush every 64 spawns to avoid fd exhaustion
-        if (( (i+1) % 64 == 0 )); then wait "${_hcheck_pids[@]}"; _hcheck_pids=(); fi
-    done
-    wait "${_hcheck_pids[@]}"
-    READY_COUNT=$(ls "$HCHECK_TMP"/ok_* 2>/dev/null | wc -l | tr -d ' ')
-    rm -rf "$HCHECK_TMP"
+while true; do
+    READY=$(kubectl get pods -l app=p2p-server --no-headers 2>/dev/null | grep -c '1/1.*Running' || true)
+    TOTAL=$(kubectl get pods -l app=p2p-server --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    PCT=0; [ "$TOTAL" -gt 0 ] && PCT=$((READY * 100 / TOTAL))
 
-    if [ $READY_COUNT -ge $MIN_READY ]; then
+    if [ "$READY" -ge "$TOTAL_EXPECTED" ] && [ "$TOTAL" -ge "$TOTAL_EXPECTED" ]; then
+        log "${GREEN}✓ All $READY/$TOTAL nodes are ready ($PCT%)${NC}"
         break
     fi
 
     if [ $ELAPSED -ge $TIMEOUT ]; then
-        log "${YELLOW}⚠ Timeout: only $READY_COUNT/$NUMBER_OF_NODES nodes responding (need $MIN_READY healthy)${NC}"
-        if [ $READY_COUNT -lt $MIN_READY ]; then
-            log "${RED}✗ Insufficient healthy nodes ($READY_COUNT < $MIN_READY required) — aborting${NC}"
-            exit 1
-        fi
-        log "${YELLOW}Continuing with $READY_COUNT available nodes${NC}"
-        break
+        NOT_READY=$(kubectl get pods -l app=p2p-server --no-headers 2>/dev/null | grep -v '1/1.*Running' | awk '{print $3}' | sort | uniq -c | tr '\n' ', ')
+        log "${RED}✗ Timeout after ${ELAPSED}s: $READY/$TOTAL ready ($PCT%), need all $TOTAL_EXPECTED${NC}"
+        log "  Not ready: $NOT_READY"
+        exit 1
     fi
 
-    sleep 2
-    ELAPSED=$((ELAPSED + 2))
-    echo -ne "  Ready: $READY_COUNT/$NUMBER_OF_NODES nodes (need $MIN_READY)... ${ELAPSED}s\r"
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
+    if (( ELAPSED % 10 == 0 )); then
+        NOT_READY=$(kubectl get pods -l app=p2p-server --no-headers 2>/dev/null | grep -v '1/1.*Running' | awk '{print $3}' | sort | uniq -c | tr '\n' ', ')
+        log "[Health] Ready: $READY/$TOTAL ($PCT%) | Need: all $TOTAL_EXPECTED | ${ELAPSED}s"
+        [ -n "$NOT_READY" ] && log "  Not ready: $NOT_READY"
+    fi
 done
-
-log "${GREEN}✓ $READY_COUNT/$NUMBER_OF_NODES nodes are ready (${MIN_READY} required)${NC}"
 echo
 
+# Step 2b: Wait for P2P mesh to stabilize before JMeter starts.
+# Readiness probes only verify the HTTP endpoint is up — they don't check peer
+# connectivity. At 512 nodes, ~1536 WebSocket connections fire simultaneously;
+# until they all complete, many healthy shards self-report as FAULTY because
+# they see fewer than MIN_APPROVALS connected peers. Polling the core-server's
+# shard status ensures consensus can actually run before we send transactions.
+if [ "${NUMBER_OF_NODES}" -gt 32 ]; then
+    # Expected healthy shards = total_shards - broken_shards
+    # Adversarial placement breaks floor(FAULTY_NODES / faultyPerShardToBreak) shards
+    TOTAL_SHARDS=$((NUMBER_OF_NODES / NUMBER_OF_NODES_PER_SHARD))
+    FAULTY_PER_SHARD_TO_BREAK=$(( NUMBER_OF_NODES_PER_SHARD / 3 + 1 ))
+    BROKEN_SHARDS=$(( NUMBER_OF_FAULTY_NODES / FAULTY_PER_SHARD_TO_BREAK ))
+    EXPECTED_HEALTHY=$(( TOTAL_SHARDS - BROKEN_SHARDS ))
+    # Require at least 80% of expected healthy shards to be reporting UNDER-UTILIZED
+    MIN_HEALTHY=$(( EXPECTED_HEALTHY * 80 / 100 ))
+    [ "$MIN_HEALTHY" -lt 1 ] && MIN_HEALTHY=1
+    log "${BLUE}Step 2b: Waiting for P2P mesh to stabilize ($MIN_HEALTHY/$EXPECTED_HEALTHY healthy shards needed)...${NC}"
+    STABILIZE_TIMEOUT=300
+    STABILIZE_ELAPSED=0
+    while [ $STABILIZE_ELAPSED -lt $STABILIZE_TIMEOUT ]; do
+        # Sample every Nth node (N = nodes_per_shard) and count distinct
+        # non-FAULTY shard indices. Nodes are shuffled across shards so any
+        # sampling stride covers different shards.
+        HEALTHY_COUNT=$(
+            for ((i=0; i<NUMBER_OF_NODES; i+=NUMBER_OF_NODES_PER_SHARD)); do
+                PORT=$((3001 + i))
+                curl -s --max-time 2 http://localhost:$PORT/stats 2>/dev/null || true
+                echo  # newline delimiter so Python parses each response as a separate line
+            done | python3 -c "
+import sys, json
+healthy = set()
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try:
+        d = json.loads(line)
+        shard = d.get('rate',{}).get('shardIndex','')
+        status = d.get('rate',{}).get('shardStatus','FAULTY')
+        if status != 'FAULTY' and shard:
+            healthy.add(shard)
+    except: pass
+print(len(healthy))" 2>/dev/null || echo 0
+        )
+        if [ "${HEALTHY_COUNT:-0}" -ge "$MIN_HEALTHY" ]; then
+            log "${GREEN}✓ P2P mesh stabilized: $HEALTHY_COUNT healthy shards (need $MIN_HEALTHY)${NC}"
+            break
+        fi
+        sleep 5
+        STABILIZE_ELAPSED=$((STABILIZE_ELAPSED + 5))
+        if (( STABILIZE_ELAPSED % 15 == 0 )); then
+            log "[P2P] Healthy shards: ${HEALTHY_COUNT:-0}/$EXPECTED_HEALTHY (need $MIN_HEALTHY) | ${STABILIZE_ELAPSED}s"
+        fi
+    done
+    if [ $STABILIZE_ELAPSED -ge $STABILIZE_TIMEOUT ]; then
+        log "${YELLOW}⚠ P2P stabilization timeout (${STABILIZE_TIMEOUT}s) — proceeding with ${HEALTHY_COUNT:-0} healthy shards${NC}"
+    fi
+fi
+
+# Set up port-forwards for JMeter (skip in hostNetwork mode — pods bind directly)
+if [ "${USE_HOST_NETWORK:-}" = "true" ]; then
+    log "Skipping port-forwards (hostNetwork mode — pods bind directly to host ports)"
+else
+    log "Setting up port-forwards for JMeter..."
+    # Raise file-descriptor and inotify limits
+    ulimit -n 65536 2>/dev/null || true
+    if [ -f /proc/sys/fs/inotify/max_user_instances ]; then
+        sudo sysctl -w fs.inotify.max_user_instances=8192 2>/dev/null || true
+        sudo sysctl -w fs.inotify.max_user_watches=524288 2>/dev/null || true
+    fi
+    # Start in batches to avoid overwhelming the API server
+    PF_BATCH=50
+    for ((i=0; i<NUMBER_OF_NODES; i++)); do
+        nohup kubectl port-forward pod/p2p-server-$i $((3001+i)):$((3001+i)) >> server.log 2>&1 &
+        if (( (i+1) % PF_BATCH == 0 )); then sleep 2; fi
+    done
+    # Scale settle time with node count
+    PF_SETTLE=$((NUMBER_OF_NODES / 10))
+    [ $PF_SETTLE -lt 10 ] && PF_SETTLE=10
+    [ $PF_SETTLE -gt 60 ] && PF_SETTLE=60
+    log "Waiting ${PF_SETTLE}s for port-forwards to stabilize..."
+    sleep $PF_SETTLE
+fi
+
 # Step 3: Run JMeter test
+# Start diagnostic pod log streaming BEFORE JMeter — captures block commits,
+# clears, redistributions, and duplicate rejections for post-test analysis.
+# start.sh may have already started this, but if it crashed early (e.g. kubectl
+# apply --server-side conflict), there are no background kubectl-log processes.
+# Kill any stale ones first, then start fresh.
+pkill -f "kubectl logs" 2>/dev/null || true
+sleep 1
+if [ -f nodesEnv.yml ]; then
+    DIAG_PODS=$(python3 - <<'PYEOF'
+import re, collections
+text = open("nodesEnv.yml").read()
+entries = []
+for block in re.split(r'\n(?=- )', text.strip()):
+    entry = {}
+    for line in block.splitlines():
+        m = re.match(r"[ -]*(\w+):\s*'?([^']+?)'?\s*$", line.strip())
+        if m:
+            entry[m.group(1)] = m.group(2).strip("'\"")
+    if "P2P_PORT" in entry:
+        entries.append(entry)
+by_shard = collections.defaultdict(list)
+for e in entries:
+    by_shard[e.get("SUBSET_INDEX","")].append(e)
+healthy_pod_indices = []
+dead_pod_indices    = []
+for subset, nodes in by_shard.items():
+    faulty_count = sum(1 for n in nodes if n.get("IS_FAULTY","false").lower() == "true")
+    pod_indices  = [int(n["P2P_PORT"]) - 5001 for n in nodes]
+    if faulty_count == 0 and not healthy_pod_indices:
+        healthy_pod_indices = pod_indices
+    elif faulty_count >= 2 and not dead_pod_indices:
+        dead_pod_indices = pod_indices
+    if healthy_pod_indices and dead_pod_indices:
+        break
+all_indices = healthy_pod_indices + dead_pod_indices
+print(" ".join(f"p2p-server-{i}" for i in all_indices))
+PYEOF
+)
+    if [ -n "$DIAG_PODS" ]; then
+        log "Diagnostic log streaming: core-server $DIAG_PODS"
+        kubectl logs core-server -f --prefix >> server.log 2>&1 &
+        for _POD in $DIAG_PODS; do
+            kubectl logs "$_POD" -f --prefix >> server.log 2>&1 &
+        done
+    fi
+fi
+
 log "${BLUE}Step 3: Running JMeter performance test...${NC}"
 log "  Duration: ${JMETER_DURATION}s (active load: $((JMETER_DURATION - JMETER_RAMP_DOWN))s + ramp-down: ${JMETER_RAMP_DOWN}s)"
 log "  Threads: ${JMETER_THREADS}"
@@ -191,7 +285,8 @@ log "  Ramp-up: ${JMETER_RAMP_UP}s"
 log "  Ramp-down: ${JMETER_RAMP_DOWN}s"
 echo
 
-# Start port-forward watchdog (restarts any dead forwards every 3s during JMeter)
+# Start port-forward watchdog (only when not using hostNetwork)
+if [ "${USE_HOST_NETWORK:-}" != "true" ]; then
 (
     while true; do
         sleep 3
@@ -204,6 +299,7 @@ echo
     done
 ) &
 WATCHDOG_PID=$!
+fi
 
 # Active load duration = total duration minus ramp-down quiet phase
 JMETER_ACTIVE_DURATION=$(( JMETER_DURATION - JMETER_RAMP_DOWN ))
@@ -222,7 +318,9 @@ jmeter -n -t "Test Plan.jmx" \
     -e -o "${RESULTS_DIR}/pbft-rapidchain-${TIMESTAMP}-report" 2>&1 | tee -a server.log
 
 # Kill watchdog
-kill $WATCHDOG_PID 2>/dev/null || true
+if [ -n "${WATCHDOG_PID:-}" ]; then
+    kill $WATCHDOG_PID 2>/dev/null || true
+fi
 
 log "${GREEN}✓ JMeter test completed${NC}"
 
@@ -234,16 +332,18 @@ if [ "${JMETER_RAMP_DOWN}" -gt 0 ]; then
 fi
 echo
 
-# Re-establish port-forwarding before stats collection (may have died during JMeter run)
-pkill -f "kubectl port-forward" 2>/dev/null || true
-sleep 1
-for ((i=0; i<NUMBER_OF_NODES; i++)); do
-    nohup kubectl port-forward pod/p2p-server-$i $((3001+i)):$((3001+i)) >> server.log 2>&1 &
-done
+# Re-establish port-forwarding before stats collection (only when not using hostNetwork)
+if [ "${USE_HOST_NETWORK:-}" != "true" ]; then
+    pkill -f "kubectl port-forward" 2>/dev/null || true
+    sleep 1
+    for ((i=0; i<NUMBER_OF_NODES; i++)); do
+        nohup kubectl port-forward pod/p2p-server-$i $((3001+i)):$((3001+i)) >> server.log 2>&1 &
+    done
+fi
 
 # Wait for transaction pool to drain (wait until unassigned hits 0)
 log "${BLUE}Waiting for transaction pool to drain...${NC}"
-DRAIN_TIMEOUT=120
+DRAIN_TIMEOUT=60
 DRAIN_ELAPSED=0
 PREV_UNASSIGNED=-1
 UNCHANGED_COUNT=0
@@ -263,7 +363,7 @@ while [ $DRAIN_ELAPSED -lt $DRAIN_TIMEOUT ]; do
     while [ $(( OFFSET * STEP )) -lt $NUMBER_OF_NODES ]; do
         IDX=$(( OFFSET * STEP ))
         PORT=$((3001+IDX))
-        DRAIN_STATS=$(curl -s --max-time 3 http://localhost:$PORT/stats 2>/dev/null || echo '')
+        DRAIN_STATS=$(curl -s --max-time 1 http://localhost:$PORT/stats 2>/dev/null || echo '')
         if [ -n "$DRAIN_STATS" ]; then
             NODE_UNASSIGNED=$(echo "$DRAIN_STATS" | python3 -c "
 import sys, json
@@ -339,7 +439,7 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
     
     # Count total transactions fired by JMeter
     if [ -f "${RESULTS_FILE}" ]; then
-        JMETER_TX_FIRED=$(grep -c '<httpSample' "${RESULTS_FILE}" 2>/dev/null || echo 0)
+        JMETER_TX_FIRED=$(grep -c '<httpSample' "${RESULTS_FILE}" 2>/dev/null || true)
         echo "Total Transactions Fired by Test: $JMETER_TX_FIRED"
     else
         JMETER_TX_FIRED=0
@@ -355,78 +455,77 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
     TOTAL_UNASSIGNED_TX=0
     NODES_RESPONDED=0
 
-    # Query ALL nodes; for each shard keep the MAXIMUM value reported by any node
-    # in that shard. Nodes within the same shard may be slightly out of sync
-    # (one may have committed a block its peer hasn't received yet), so taking
-    # the max gives the most up-to-date view.
-    # Uses dynamically-named variables (SHARD_BLOCKS_<var>, ...) to avoid
-    # declare -A which isn't available in bash 3.2 on macOS.
-    SEEN_SHARDS=""
+    # Fetch all node stats in parallel (128 sequential curls → 14s; parallel → ~1-2s).
+    # Each curl writes to a temp file; a single python3 script aggregates all results.
+    STATS_TMP=$(mktemp -d)
+    trap "rm -rf $STATS_TMP" RETURN 2>/dev/null || true
     for ((i=0; i<NUMBER_OF_NODES; i++)); do
         PORT=$((3001+i))
-        CANDIDATE=$(curl -s --max-time 3 http://localhost:$PORT/stats 2>/dev/null || echo '')
-        if [ -z "$CANDIDATE" ] || ! echo "$CANDIDATE" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
-            continue
-        fi
-        IS_NODE_FAULTY=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('isFaulty', False) else 'false')" 2>/dev/null || echo 'false')
-        if [ "$IS_NODE_FAULTY" = "true" ]; then
-            continue
-        fi
-        NODES_RESPONDED=$((NODES_RESPONDED + 1))
-
-        NODE_SHARDS=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(k) for k in d.get('total',{})]" 2>/dev/null)
-        for SHARD_IDX in $NODE_SHARDS; do
-            # Register shard on first encounter
-            if ! echo "$SEEN_SHARDS" | grep -qw "$SHARD_IDX"; then
-                SEEN_SHARDS="$SEEN_SHARDS $SHARD_IDX"
-            fi
-
-            # Sanitize shard key into a valid shell variable name
-            SHARD_VAR=$(echo "$SHARD_IDX" | tr -cd '[:alnum:]_')
-
-            BLOCKS=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['total']['$SHARD_IDX'].get('blocks',0))" 2>/dev/null || echo 0)
-            TX=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['total']['$SHARD_IDX'].get('transactions',0))" 2>/dev/null || echo 0)
-            UNASSIGNED=$(echo "$CANDIDATE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['total']['$SHARD_IDX'].get('unassignedTransactions',0))" 2>/dev/null || echo 0)
-
-            BLOCKS=${BLOCKS:-0}; TX=${TX:-0}; UNASSIGNED=${UNASSIGNED:-0}
-
-            # Update rolling max for this shard.
-            # Unassigned is tied to the node with the most blocks: that node has
-            # committed the most and therefore has the smallest (most accurate) pool.
-            # Independent MAX would pick the most-stale node's inflated pool size.
-            PREV_BLOCKS=$(eval echo "\${SHARD_BLOCKS_${SHARD_VAR}:-0}")
-            PREV_TX=$(eval echo "\${SHARD_TX_${SHARD_VAR}:-0}")
-            if [ "$BLOCKS" -gt "$PREV_BLOCKS" ]; then
-                eval "SHARD_BLOCKS_${SHARD_VAR}=$BLOCKS"
-                eval "SHARD_UNASSIGNED_${SHARD_VAR}=$UNASSIGNED"
-            fi
-            [ "$TX" -gt "$PREV_TX" ] && eval "SHARD_TX_${SHARD_VAR}=$TX"
-        done
+        curl -s --max-time 2 "http://localhost:$PORT/stats" > "$STATS_TMP/$i.json" 2>/dev/null &
     done
+    wait
 
-    # Print per-shard max and accumulate totals
-    for SHARD_IDX in $SEEN_SHARDS; do
-        SHARD_VAR=$(echo "$SHARD_IDX" | tr -cd '[:alnum:]_')
-        BLOCKS=$(eval echo "\${SHARD_BLOCKS_${SHARD_VAR}:-0}")
-        TX=$(eval echo "\${SHARD_TX_${SHARD_VAR}:-0}")
-        UNASSIGNED=$(eval echo "\${SHARD_UNASSIGNED_${SHARD_VAR}:-0}")
+    # Single python3 invocation processes all node responses
+    AGGREGATED=$(python3 - "$STATS_TMP" "$NUMBER_OF_NODES" << 'PYAGG'
+import sys, json, os
+stats_dir = sys.argv[1]
+num_nodes = int(sys.argv[2])
 
-        echo ""
-        echo "Shard $SHARD_IDX (max across shard nodes):"
-        echo "----------------------------------------"
-        echo "  Blocks Created: $BLOCKS"
-        echo "  Transactions in Blocks: $TX"
-        echo "  Unassigned Transactions: $UNASSIGNED"
+shard_max = {}   # shard_idx -> {blocks, tx, unassigned}
+nodes_responded = 0
+per_shard_text = []
 
-        TOTAL_BLOCKS=$((TOTAL_BLOCKS + BLOCKS))
-        TOTAL_TX_IN_BLOCKS=$((TOTAL_TX_IN_BLOCKS + TX))
-        TOTAL_UNASSIGNED_TX=$((TOTAL_UNASSIGNED_TX + UNASSIGNED))
-    done
+for i in range(num_nodes):
+    fpath = os.path.join(stats_dir, f"{i}.json")
+    if not os.path.exists(fpath) or os.path.getsize(fpath) == 0:
+        continue
+    try:
+        with open(fpath) as f:
+            d = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        continue
+    if d.get("isFaulty", False):
+        continue
+    nodes_responded += 1
+    for shard_idx, vals in d.get("total", {}).items():
+        blocks = vals.get("blocks", 0)
+        tx = vals.get("transactions", 0)
+        ua = vals.get("unassignedTransactions", 0)
+        prev = shard_max.get(shard_idx)
+        if prev is None:
+            shard_max[shard_idx] = {"blocks": blocks, "tx": tx, "ua": ua}
+        else:
+            if blocks > prev["blocks"]:
+                prev["blocks"] = blocks; prev["ua"] = ua
+            if tx > prev["tx"]:
+                prev["tx"] = tx
 
-    if [ -z "$SEEN_SHARDS" ]; then
-        echo ""
-        echo "  (No node responded to /stats query)"
-    fi
+total_blocks = 0; total_tx = 0; total_ua = 0
+for idx in sorted(shard_max.keys()):
+    s = shard_max[idx]
+    per_shard_text.append(f"Shard {idx} (max across shard nodes):")
+    per_shard_text.append("----------------------------------------")
+    per_shard_text.append(f"  Blocks Created: {s['blocks']}")
+    per_shard_text.append(f"  Transactions in Blocks: {s['tx']}")
+    per_shard_text.append(f"  Unassigned Transactions: {s['ua']}")
+    per_shard_text.append("")
+    total_blocks += s["blocks"]; total_tx += s["tx"]; total_ua += s["ua"]
+
+print(f"NODES_RESPONDED={nodes_responded}")
+print(f"TOTAL_BLOCKS={total_blocks}")
+print(f"TOTAL_TX_IN_BLOCKS={total_tx}")
+print(f"TOTAL_UNASSIGNED_TX={total_ua}")
+print("---SHARDS---")
+print("\n".join(per_shard_text) if per_shard_text else "  (No node responded to /stats query)")
+PYAGG
+    )
+    rm -rf "$STATS_TMP"
+
+    # Parse the aggregated output
+    eval "$(echo "$AGGREGATED" | sed -n '/^[A-Z_]*=/p')"
+    SHARD_TEXT=$(echo "$AGGREGATED" | sed '1,/^---SHARDS---$/d')
+
+    echo "$SHARD_TEXT"
     
     echo ""
     echo "=========================================="
@@ -443,7 +542,7 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
     fi
     echo ""
     echo "UNASSIGNED TRANSACTION REASONS:"
-    echo "  - Transaction pool not full (threshold: ${TRANSACTION_THRESHOLD})"
+    echo "  - Transaction pool not full (threshold: ${TRANSACTION_THRESHOLD}) — includes inflight (assigned-to-block) transactions"
     echo "  - Block pool not full (block threshold: ${BLOCK_THRESHOLD})"
     echo "  - Waiting for committee validation"
     echo "  - Consensus not reached for pending blocks"

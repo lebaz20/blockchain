@@ -43,12 +43,16 @@ class IDAGossip {
   }
 
   getSocketGossipPeers(sendersSubset, socketsKey) {
+    // Guard: peers may not be connected yet during startup — return empty rather than throwing.
+    if (!this.socketGossipPeers) return []
     const sockets = socketsKey
       ? (this.socketGossipPeers[socketsKey] ?? this.socketGossipPeers)
       : this.socketGossipPeers
+    if (!sockets) return []
     return Object.keys(sockets)
       .filter((port) => !sendersSubset.includes(port))
-      .map((port) => sockets[port].socket)
+      .map((port) => sockets[port]?.socket)
+      .filter(Boolean)
   }
 
   getSocketGossipCore(socketsKey) {
@@ -173,8 +177,10 @@ class IDAGossip {
             ? this.getSocketGossipPeers(sendersSubset, socketsKey)
             : targetsSubset
         } catch (error) {
-          console.error('Error getting peers for gossip:', error, message)
-          throw error
+          // Log but never re-throw — gossip errors inside setImmediate callbacks
+          // propagate as uncaughtException and crash the Node.js process.
+          console.error('Error getting peers for gossip:', error.message)
+          return Promise.resolve()
         }
       }
     }

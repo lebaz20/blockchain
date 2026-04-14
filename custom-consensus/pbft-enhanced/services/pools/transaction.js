@@ -7,8 +7,6 @@ const logger = require('../../utils/logger')
 // Once this exceeds a new block is generated
 const config = require('../../config')
 const TIMEOUTS = require('../../constants/timeouts')
-const { TRANSACTION_THRESHOLD } = config.get()
-
 const TRANSACTION_REASSIGNMENT_TIMEOUT_MS = TIMEOUTS.TRANSACTION_REASSIGNMENT_TIMEOUT_MS
 
 class TransactionPool {
@@ -17,8 +15,13 @@ class TransactionPool {
     this.transactionIds = new Set() // O(1) existence index across all buckets
     this.transactionsCreatedAt = {}
     this.reassignmentTimers = {}
+    // Committed TX IDs — prevents TXs from being re-proposed after the
+    // safety-reassignment timer moves them back to unassigned.
+    this.committedTxIds = new Set()
     // Track the rate of incoming transactions
     this.ratePerMin = {}
+    // O(1) counter for verification TXs in unassigned pool — avoids O(n) filter in getTotal()
+    this._verificationUnassignedCount = 0
   }
 
   // pushes transactions in the list
@@ -28,21 +31,30 @@ class TransactionPool {
     }
     this.transactions.unassigned.push(transaction)
     this.transactionIds.add(transaction.id)
+    if (transaction._type === 'verification') this._verificationUnassignedCount++
 
     RateUtility.updateRatePerMin(this.ratePerMin, transaction.createdAt)
   }
 
   // assign block transactions to the block via block hash
   // Release assignment after x time in case block creation doesn't succeed
-  assignTransactions(block) {
+  assignTransactions(block, reassignmentTimeoutMs = TRANSACTION_REASSIGNMENT_TIMEOUT_MS) {
     if (!block || !block.hash || !Array.isArray(block.data)) {
       throw new Error('Invalid block: block with hash and data array is required')
     }
     const assignedTransactions = block.data
     const removeIds = new Set(assignedTransactions.map((item) => item.id))
+    // Track how many verification TXs are being removed from unassigned
+    const prevLen = this.transactions.unassigned.length
     this.transactions.unassigned = this.transactions.unassigned.filter(
       (item) => !removeIds.has(item.id)
     )
+    // Recount only if items were actually removed (common path)
+    if (this.transactions.unassigned.length < prevLen) {
+      this._verificationUnassignedCount = this.transactions.unassigned.filter(
+        (tx) => tx._type === 'verification'
+      ).length
+    }
     // NOTE: transactionIds Set keeps these IDs — transactions are still in the pool
     // (just moved to a hash bucket); they'll be deleted from Set in clear() on commit.
 
@@ -51,12 +63,17 @@ class TransactionPool {
     this.transactionsCreatedAt[hash] = Date.now()
 
     // Add up to 20% random jitter so stalled blocks don't all reassign simultaneously
-    const jitter = Math.floor(Math.random() * TRANSACTION_REASSIGNMENT_TIMEOUT_MS * 0.2)
+    const jitter = Math.floor(Math.random() * reassignmentTimeoutMs * 0.2)
     this.reassignmentTimers[hash] = setTimeout(() => {
       delete this.reassignmentTimers[hash]
-      // remove the block hash after 2 minutes
+      // remove the block hash after timeout
       if (this.transactions[hash] && this.transactions[hash].length > 0) {
-        this.transactions.unassigned = [...this.transactions.unassigned, ...this.transactions[hash]]
+        // Filter out any TXs that were committed while inflight — prevents
+        // the same TX from being re-proposed in a new block after reassignment.
+        const uncommitted = this.transactions[hash].filter(
+          (item) => !this.committedTxIds.has(item.id)
+        )
+        this.transactions.unassigned = [...this.transactions.unassigned, ...uncommitted]
         delete this.transactions[hash]
         delete this.transactionsCreatedAt[hash]
         // Remove duplicates from unassigned pool — O(n) via Set
@@ -65,7 +82,7 @@ class TransactionPool {
           (item) => _seenIds.size < _seenIds.add(item.id).size
         )
       }
-    }, TRANSACTION_REASSIGNMENT_TIMEOUT_MS + jitter)
+    }, reassignmentTimeoutMs + jitter)
   }
 
   // get inflight blocks
@@ -80,8 +97,11 @@ class TransactionPool {
 
   // returns true if transaction pool is full
   // else returns false
+  // Reads TRANSACTION_THRESHOLD live so the adaptive block-size logic in
+  // p2pserver.js (which calls config.set to scale the threshold under load)
+  // is reflected immediately without a process restart.
   poolFull() {
-    return this.transactions.unassigned.length >= TRANSACTION_THRESHOLD
+    return this.transactions.unassigned.length >= config.get().TRANSACTION_THRESHOLD
   }
 
   // wrapper function to verify transactions
@@ -102,6 +122,7 @@ class TransactionPool {
   // check if other hashes have the same transactions, then move them to the unassigned pool
   // check if the unassigned pool has the same transactions, then remove them
   removeDuplicates(blockHash, transactions) {
+    const _beforeUnassigned = this.transactions.unassigned.length
     Object.keys(this.transactions).forEach((hash) => {
       if (blockHash === hash || 'unassigned' === hash) {
         return // skip the current block hash and unassigned pool
@@ -124,26 +145,33 @@ class TransactionPool {
       seenIds.add(item.id)
       return true
     })
-    // Remove committed IDs from the existence index
-    committedIds.forEach((id) => this.transactionIds.delete(id))
+    // Keep committed IDs in the existence index so redistributed TXs
+    // cannot pass transactionExists() and be re-added after commit.
+    // Recount verification TXs after dedup
+    this._verificationUnassignedCount = this.transactions.unassigned.filter(
+      (tx) => tx._type === 'verification'
+    ).length
+    logger.debug(
+      `REMOVE_DUPLICATES block=#${blockHash.slice(0, 8)} committed=${transactions.length}` +
+        ` beforeUnassigned=${_beforeUnassigned} afterUnassigned=${this.transactions.unassigned.length}` +
+        ` seenIndex=${this.transactionIds.size}`
+    )
   }
-
-  // empties the pool
   clear(hash, data) {
     // Fast exit: _handleCommit clears the pool immediately on commit, so when
-    // _handleRoundChange calls clear() ~100 ms later the bucket is already gone
-    // and all committed IDs have been removed from transactionIds.  Avoid the
-    // O(n) Set build + O(m) filter + O(n) forEach that would otherwise run
-    // redundantly.  data[0].id check is O(1) and representative because the
-    // whole batch was committed atomically.
-    if (
-      !(hash in this.transactions) &&
-      (data.length === 0 || !this.transactionIds.has(data[0].id))
-    ) {
+    // _handleRoundChange calls clear() ~100 ms later the bucket is already gone.
+    // Check if the hash bucket still exists; if not, the block was already cleared.
+    if (!(hash in this.transactions) && data.length === 0) {
       return
     }
 
-    logger.log(`TRANSACTION POOL CLEARED FOR BLOCK #${hash}`)
+    const _beforeUnassigned = this.transactions.unassigned.length
+    const _bucketSize = this.transactions[hash] ? this.transactions[hash].length : 0
+    logger.log(
+      `CLEAR block=#${hash.slice(0, 8)} committed=${data.length}` +
+        ` beforeUnassigned=${_beforeUnassigned} bucket=${_bucketSize}` +
+        ` seenIndex=${this.transactionIds.size}`
+    )
 
     // Cancel the safety-reassignment timer — block committed successfully
     if (this.reassignmentTimers[hash]) {
@@ -156,11 +184,22 @@ class TransactionPool {
       delete this.transactionsCreatedAt[hash]
     }
     const removeIds = new Set(data.map((item) => item.id))
+    // Track committed TX IDs so reassignment timer won't re-propose them
+    removeIds.forEach((id) => this.committedTxIds.add(id))
     this.transactions.unassigned = this.transactions.unassigned.filter(
       (item) => !removeIds.has(item.id)
     )
-    // Remove committed IDs from the existence index
-    removeIds.forEach((id) => this.transactionIds.delete(id))
+    // Keep committed IDs in the existence index — prevents TX duplication
+    // when redistribution re-broadcasts already-committed transactions.
+    // Recount verification TXs — clear may remove some
+    this._verificationUnassignedCount = this.transactions.unassigned.filter(
+      (tx) => tx._type === 'verification'
+    ).length
+    logger.log(
+      `CLEAR DONE block=#${hash.slice(0, 8)}` +
+        ` afterUnassigned=${this.transactions.unassigned.length}` +
+        ` seenIndex=${this.transactionIds.size}`
+    )
   }
 
   // Immediately return all assigned-but-uncommitted TX back to unassigned.
@@ -182,6 +221,14 @@ class TransactionPool {
     this.transactions.unassigned = this.transactions.unassigned.filter(
       (item) => seen.size < seen.add(item.id).size
     )
+    // Filter out committed TXs — prevents re-proposal after view-change
+    this.transactions.unassigned = this.transactions.unassigned.filter(
+      (item) => !this.committedTxIds.has(item.id)
+    )
+    // Recount verification TXs after merge
+    this._verificationUnassignedCount = this.transactions.unassigned.filter(
+      (tx) => tx._type === 'verification'
+    ).length
   }
 }
 

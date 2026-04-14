@@ -6,21 +6,28 @@ const logger = require('../utils/logger')
 const Block = require('./block')
 
 const HASH_FIRST_CHAR_INDEX = 0
-const MAX_RETRY_ATTEMPTS = 50
-const INITIAL_RETRY_INTERVAL_MS = 1000
-const RETRY_INTERVAL_INCREMENT_MS = 1000
+const MAX_RETRY_ATTEMPTS = 10
+const INITIAL_RETRY_INTERVAL_MS = 300
+const RETRY_INTERVAL_INCREMENT_MS = 300
 const CPU_UNDER_UTILIZED_THRESHOLD = 20
-const CPU_OVER_UTILIZED_THRESHOLD = 70
+// Raised from 70 to 85 so shards running EMA-driven blocks (which push CPU to
+// 70-80%) stay NORMAL rather than OVER_UTILIZED.  This keeps them visible as
+// redirect targets in findRedirectCandidate without needing a last-resort
+// OVER_UTILIZED fallback that causes continuous dead-shard flooding.
+const CPU_OVER_UTILIZED_THRESHOLD = 85
 const RateUtility = require('../utils/rate')
 const { readCgroupCPUPercentPromise } = require('../utils/cpu')
 const { SHARD_STATUS } = require('../constants/status')
-const { NODES_SUBSET, NUMBER_OF_NODES_PER_SHARD, SUBSET_INDEX, IS_FAULTY, MIN_APPROVALS } =
+const { NODES_SUBSET, SUBSET_INDEX, IS_FAULTY, MIN_APPROVALS } =
   config.get()
 
 const CPU_CACHE_INTERVAL_MS = 5000
 
 class Blockchain {
   constructor(validators, transactionPool, isCore = false) {
+    // Mutable shard identity — updated by initMergedChain() when this node
+    // joins a merged shard so all own-chain operations use the new key.
+    this._subsetIndex = SUBSET_INDEX
     if (!isCore) {
       this.validatorList = validators.generateAddresses(NODES_SUBSET)
       this.transactionPool = transactionPool
@@ -86,7 +93,25 @@ class Blockchain {
     }
   }
 
-  addBlock(block, subsetIndex = SUBSET_INDEX) {
+  // Switch this node's own-shard chain to a new identity (used by shard merge).
+  // Creates a fresh genesis under the new key so all merged nodes start from
+  // sequence 0 with an identical genesis hash — PBFT consensus requires that
+  // all participants agree on the previous block hash.
+  // Old chain data stays intact under the original key for stats / history.
+  initMergedChain(newSubsetIndex) {
+    const genesis = Block.genesis()
+    this.chain[newSubsetIndex] = [genesis]
+    this._blockHashSets[newSubsetIndex] = new Set([genesis.hash])
+    this._txCountCache[newSubsetIndex] = 0
+    this._verificationTxCountCache[newSubsetIndex] = 0
+    this._normalBlockCountCache[newSubsetIndex] = 0
+    this._verificationBlockCountCache[newSubsetIndex] = 0
+    this._subsetIndex = newSubsetIndex
+    logger.log(`BLOCKCHAIN re-keyed from ${SUBSET_INDEX} → ${newSubsetIndex}`)
+  }
+
+  addBlock(block, subsetIndex) {
+    if (subsetIndex === undefined) subsetIndex = this._subsetIndex
     if (!this.chain[subsetIndex]) {
       const genesis = Block.genesis()
       this.chain[subsetIndex] = [genesis]
@@ -122,7 +147,7 @@ class Blockchain {
 
   createBlock(transactions, wallet, previousBlock = undefined) {
     const block = Block.createBlock(
-      previousBlock ?? this.chain[SUBSET_INDEX][this.chain[SUBSET_INDEX].length - 1],
+      previousBlock ?? this.chain[this._subsetIndex][this.chain[this._subsetIndex].length - 1],
       transactions,
       wallet
     )
@@ -130,25 +155,29 @@ class Blockchain {
   }
 
   getProposer(blocksCount = undefined, viewOffset = 0) {
-    const currentChainLength = this.chain[SUBSET_INDEX].length
+    const currentChainLength = this.chain[this._subsetIndex].length
     let blockIndex = (blocksCount ?? currentChainLength) - 1
-    if (!this.chain[SUBSET_INDEX][blockIndex]?.hash) {
+    if (!this.chain[this._subsetIndex][blockIndex]?.hash) {
       blockIndex = currentChainLength - 1
     }
 
     const hashCharCode =
-      this.chain[SUBSET_INDEX][blockIndex].hash[HASH_FIRST_CHAR_INDEX].charCodeAt(0)
-    const proposerRotationModulo = NUMBER_OF_NODES_PER_SHARD
+      this.chain[this._subsetIndex][blockIndex].hash[HASH_FIRST_CHAR_INDEX].charCodeAt(0)
+    // Read dynamically so shard merges (which update config at runtime) take
+    // effect immediately without restarting the node.
+    const { NUMBER_OF_NODES_PER_SHARD: _nps, NODES_SUBSET: _ns } = config.get()
+    const proposerRotationModulo = _nps
     const index = (hashCharCode + viewOffset) % proposerRotationModulo
 
     return {
       proposer: this.validatorList[index],
-      proposerIndex: NODES_SUBSET[index]
+      proposerIndex: _ns[index]
     }
   }
 
   isValidBlock(block, blocksCount, previousBlock = undefined, viewOffset = 0) {
-    const lastBlock = previousBlock ?? this.chain[SUBSET_INDEX][this.chain[SUBSET_INDEX].length - 1]
+    const lastBlock =
+      previousBlock ?? this.chain[this._subsetIndex][this.chain[this._subsetIndex].length - 1]
     const isValid =
       lastBlock.sequenceNo + 1 === block.sequenceNo &&
       block.lastHash === lastBlock.hash &&
@@ -165,15 +194,25 @@ class Blockchain {
   }
 
   async addUpdatedBlock(hash, blockPool, preparePool, commitPool) {
-    const blockExists = await this.waitUntilAvailableBlock(hash, (hash) =>
-      blockPool.existingBlockByHash(hash)
+    const blockExists = await this.waitUntilAvailableBlock(
+      hash,
+      (hash) => blockPool.existingBlockByHash(hash),
+      blockPool // EventEmitter — resolves on 'block' event
     )
     if (blockExists) {
       const block = blockPool.getBlock(hash)
       const previousBlockExists = await this.waitUntilAvailableBlock(block.lastHash, (hash) =>
         this.existingBlock(hash)
       )
-      if (previousBlockExists && this.transactionPool.hashExists(block.hash)) {
+      if (previousBlockExists) {
+        // Guard against concurrent commit handlers that both passed the
+        // blockNotInChain check before the first handler's addBlock completed.
+        // Caused by Node.js microtask interleaving at the two `await` yield
+        // points above — the second handler enters addUpdatedBlock while the
+        // first is still awaiting, so both see blockNotInChain=true.
+        if (this.existingBlock(hash)) return false
+        // Remove committed transactions from any pool bucket (handles nodes that
+        // missed the pre_prepare and never called assignTransactions).
         this.transactionPool.removeDuplicates(block.hash, block.data)
         block.prepareMessages = preparePool.getList(hash)
         block.commitMessages = commitPool.getList(hash)
@@ -187,7 +226,8 @@ class Blockchain {
     return false
   }
 
-  existingBlock(hash, subsetIndex = SUBSET_INDEX) {
+  existingBlock(hash, subsetIndex) {
+    if (subsetIndex === undefined) subsetIndex = this._subsetIndex
     // O(1) Set lookup replaces O(n) array.find — chain length grows throughout
     // the test and existingBlock is called on every incoming commit and every
     // cross-shard block_from_core event (5x per committed block in Enhanced).
@@ -196,21 +236,52 @@ class Blockchain {
     return !!this.chain[subsetIndex]?.find((b) => b.hash === hash)
   }
 
-  waitUntilAvailableBlock(item, existingCheck) {
+  waitUntilAvailableBlock(item, existingCheck, emitter) {
+    if (existingCheck(item)) return Promise.resolve(true)
     return new Promise((resolve) => {
-      function recExistingCheck(retryInterval, retrialCount) {
+      let settled = false
+      let retryTimer = null
+      let retrialCount = 0
+
+      const onBlock = (_hash) => {
+        if (settled) return
         if (existingCheck(item)) {
+          settled = true
+          clearTimeout(retryTimer)
+          if (emitter) emitter.removeListener('block', onBlock)
           resolve(true)
-        } else if (retrialCount <= MAX_RETRY_ATTEMPTS) {
-          setTimeout(
-            () => recExistingCheck(retryInterval + RETRY_INTERVAL_INCREMENT_MS, retrialCount + 1),
-            retryInterval + RETRY_INTERVAL_INCREMENT_MS
-          )
-        } else {
-          resolve(false)
         }
       }
-      recExistingCheck(INITIAL_RETRY_INTERVAL_MS, 1)
+
+      // Listen for new blocks added to pool/chain — resolves instantly on match
+      if (emitter) emitter.on('block', onBlock)
+
+      // Fallback polling in case events are missed (e.g., cross-shard blocks
+      // added to chain directly without going through blockPool emitter)
+      function scheduleRetry() {
+        if (settled) return
+        retrialCount++
+        if (retrialCount > MAX_RETRY_ATTEMPTS) {
+          settled = true
+          if (emitter) emitter.removeListener('block', onBlock)
+          resolve(false)
+          return
+        }
+        retryTimer = setTimeout(
+          () => {
+            if (settled) return
+            if (existingCheck(item)) {
+              settled = true
+              if (emitter) emitter.removeListener('block', onBlock)
+              resolve(true)
+            } else {
+              scheduleRetry()
+            }
+          },
+          INITIAL_RETRY_INTERVAL_MS + retrialCount * RETRY_INTERVAL_INCREMENT_MS
+        )
+      }
+      scheduleRetry()
     })
   }
 
@@ -234,16 +305,15 @@ class Blockchain {
         // Only this node's own pool is visible to it; report 0 for foreign shards
         // so the stats collection script does not multiply the pool size by shard count.
         unassignedTransactions:
-          subsetIndex === SUBSET_INDEX
+          subsetIndex === this._subsetIndex
             ? (this.transactionPool?.transactions.unassigned.length ?? 0)
             : 0,
         // How many of those unassigned are verification (cross-shard re-validation) TXs.
         // A non-zero value here means VTXs are piling up faster than the shard can commit them.
+        // Uses O(1) counter maintained by TransactionPool instead of O(n) filter.
         verificationUnassignedTransactions:
-          subsetIndex === SUBSET_INDEX
-            ? (this.transactionPool?.transactions.unassigned.filter(
-                (tx) => tx._type === 'verification'
-              ).length ?? 0)
+          subsetIndex === this._subsetIndex
+            ? (this.transactionPool?._verificationUnassignedCount ?? 0)
             : 0
       }
     })
@@ -264,6 +334,23 @@ class Blockchain {
     return SHARD_STATUS.normal
   }
 
+  // Lightweight shard status report for the core — only the 4 scalar fields
+  // the core's rate_to_core handler actually reads.  Avoids building the full
+  // 128-shard blocks/transactions objects that getRate() produces, keeping the
+  // rate_to_core WebSocket message below ~150 bytes (vs ~1.8 KB for getRate()).
+  getOwnShardRate(sockets) {
+    const faultyNodesCount = Object.keys(sockets).filter((port) => sockets[port].isFaulty).length
+    const totalNodesCount = Object.keys(sockets).length + (IS_FAULTY ? 0 : 1)
+    const nonFaultyNodesCount = totalNodesCount - faultyNodesCount
+    const previousMinute = RateUtility.getPreviousMinute()
+    return {
+      shardIndex: this._subsetIndex,
+      shardStatus: this.calculateShardStatus(nonFaultyNodesCount, this._cpuCache),
+      transactions: RateUtility.getRatePerMin(this.transactionPool?.ratePerMin, previousMinute),
+      blocks: RateUtility.getRatePerMin(this.ratePerMin[this._subsetIndex], previousMinute)
+    }
+  }
+
   // get shard rate of blocks and transactions
   async getRate(sockets) {
     const faultyNodesCount = Object.keys(sockets).filter((port) => sockets[port].isFaulty).length
@@ -280,7 +367,7 @@ class Blockchain {
     const rate = {
       blocks: {},
       transactions: {
-        [SUBSET_INDEX]: currentShardTransactionsRate
+        [this._subsetIndex]: currentShardTransactionsRate
       }
     }
     Object.keys(this.chain).forEach((subsetIndex) => {
@@ -293,7 +380,7 @@ class Blockchain {
 
     rate.shardStatus = this.calculateShardStatus(nonFaultyNodesCount, cpuPercentage)
     rate.nodeIndex = `NODE${process.env.HTTP_PORT.slice(1)}`
-    rate.shardIndex = SUBSET_INDEX
+    rate.shardIndex = this._subsetIndex
     rate.shardSize = sockets ? Object.keys(sockets).length + 1 : 0
     rate.cpu = `${cpuPercentage.toString()}%`
     return rate

@@ -150,6 +150,18 @@ app.post('/message', async (request, response) => {
   response.status(200).send('Ok')
 })
 
+// Defence-in-depth: catch any uncaught exception or unhandled rejection that
+// slips through so the process does NOT exit (which would cause CrashLoopBackOff
+// and TCP "Connection reset" errors in JMeter).  The primary fix is in gossipChunk
+// (no longer re-throws), but this ensures any future unhandled throw is logged
+// instead of killing the process.
+process.on('uncaughtException', (err) => {
+  logger.error(`UNCAUGHT EXCEPTION (process kept alive): ${err.message}`, err.stack)
+})
+process.on('unhandledRejection', (reason) => {
+  logger.error(`UNHANDLED REJECTION (process kept alive):`, reason)
+})
+
 // starts the app server
 app.listen(HTTP_PORT, () => {
   logger.log(`Listening on port ${HTTP_PORT}`)

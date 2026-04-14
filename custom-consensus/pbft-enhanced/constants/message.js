@@ -10,7 +10,9 @@ const MESSAGE_TYPE = {
   block_to_core: 'BLOCK_TO_CORE',
   block_from_core: 'BLOCK_FROM_CORE',
   rate_to_core: 'RATE_TO_CORE',
-  config_from_core: 'CONFIG_FROM_CORE'
+  config_from_core: 'CONFIG_FROM_CORE',
+  merge_shard: 'MERGE_SHARD',
+  handshake: 'HANDSHAKE'
 }
 
 module.exports = MESSAGE_TYPE

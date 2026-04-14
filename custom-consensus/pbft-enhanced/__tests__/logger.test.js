@@ -29,7 +29,7 @@ describe('Logger', () => {
 
       expect(stdoutWriteSpy).toHaveBeenCalled()
       const logCall = stdoutWriteSpy.mock.calls[0][0]
-      expect(logCall).toContain('[LOG]')
+      expect(logCall).toContain('[LOG ')
       expect(logCall).toContain(message)
     })
 
@@ -54,7 +54,7 @@ describe('Logger', () => {
 
       expect(stderrWriteSpy).toHaveBeenCalled()
       const errorCall = stderrWriteSpy.mock.calls[0][0]
-      expect(errorCall).toContain('[ERROR]')
+      expect(errorCall).toContain('[ERROR ')
       expect(errorCall).toContain(errorMessage)
     })
 
@@ -79,7 +79,7 @@ describe('Logger', () => {
 
       expect(stdoutWriteSpy).toHaveBeenCalled()
       const logCall = stdoutWriteSpy.mock.calls[0][0]
-      expect(logCall).toContain('[WARN]')
+      expect(logCall).toContain('[WARN ')
       expect(logCall).toContain(message)
     })
   })
@@ -92,7 +92,7 @@ describe('Logger', () => {
 
       expect(stdoutWriteSpy).toHaveBeenCalled()
       const logCall = stdoutWriteSpy.mock.calls[0][0]
-      expect(logCall).toContain('[DEBUG]')
+      expect(logCall).toContain('[DEBUG ')
       expect(logCall).toContain(message)
 
       delete process.env.DEBUG

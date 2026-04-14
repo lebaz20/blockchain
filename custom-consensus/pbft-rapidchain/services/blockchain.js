@@ -6,9 +6,9 @@ const logger = require('../utils/logger')
 const Block = require('./block')
 
 const HASH_FIRST_CHAR_INDEX = 0
-const MAX_RETRY_ATTEMPTS = 50
-const INITIAL_RETRY_INTERVAL_MS = 1000
-const RETRY_INTERVAL_INCREMENT_MS = 1000
+const MAX_RETRY_ATTEMPTS = 10
+const INITIAL_RETRY_INTERVAL_MS = 300
+const RETRY_INTERVAL_INCREMENT_MS = 300
 const CPU_UNDER_UTILIZED_THRESHOLD = 20
 const CPU_OVER_UTILIZED_THRESHOLD = 70
 const RateUtility = require('../utils/rate')
@@ -161,7 +161,11 @@ class Blockchain {
       const previousBlockExists = await this.waitUntilAvailableBlock(block.lastHash, (hash) =>
         this.existingBlock(hash, SUBSET_INDEX, isCommittee)
       )
-      if (previousBlockExists && this.transactionPool.hashExists(block.hash, isCommittee)) {
+      if (previousBlockExists) {
+        // Guard against concurrent commit handlers that both passed the
+        // blockNotInChain check before the first handler's addBlock completed.
+        if (this.existingBlock(hash, SUBSET_INDEX, isCommittee)) return false
+        // handles nodes that missed pre_prepare and never called assignTransactions
         this.transactionPool.removeDuplicates(block.hash, block.data, isCommittee)
         block.prepareMessages = preparePool.getList(hash, isCommittee)
         block.commitMessages = commitPool.getList(hash, isCommittee)
@@ -210,11 +214,23 @@ class Blockchain {
         transactions: this.chain[subsetIndex]
           .slice(1)
           .reduce((sum, block) => sum + block.data.length, 0),
-        // Only this node's own pool is visible to it; report 0 for foreign shards
-        // so the stats collection script does not multiply the pool size by shard count.
+        // Count ALL pending (unconfirmed) transactions — unassigned plus those
+        // assigned to inflight blocks that have not yet been committed.  Without
+        // this, dead-shard honest nodes report 0 unassigned while their TXs are
+        // stuck in transactions[blockHash], making the drain rate look like 99%
+        // when those TXs will never be confirmed.
         unassignedTransactions:
           subsetIndex === SUBSET_INDEX
-            ? (this.transactionPool?.transactions.unassigned.length ?? 0)
+            ? (() => {
+                if (!this.transactionPool) return 0
+                const pool = this.transactionPool.transactions
+                const unassigned = pool.unassigned.length
+                // Sum TXs in all inflight-block buckets (keys other than 'unassigned')
+                const assigned = Object.entries(pool)
+                  .filter(([k]) => k !== 'unassigned')
+                  .reduce((sum, [, txs]) => sum + (Array.isArray(txs) ? txs.length : 0), 0)
+                return unassigned + assigned
+              })()
             : 0
       }
     })

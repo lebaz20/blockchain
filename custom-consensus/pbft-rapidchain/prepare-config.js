@@ -143,7 +143,6 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
         }
       })
       if (committeePeersSubset.length > 0 && committeeSubset.includes(index)) {
-        console.log(`COMMITTEE Peers for ${5001 + index}: `, committeePeersSubset)
         environmentVariables.COMMITTEE_PEERS = committeePeersSubset.join(',')
       }
       // Set COMMITTEE_SUBSET for ALL committee members regardless of whether they have
@@ -154,7 +153,6 @@ nodesSubsets.forEach((nodesSubset, subsetIndex) => {
         environmentVariables.COMMITTEE_SUBSET = JSON.stringify(committeeSubset)
       }
       if (peersSubset.length > 0 && nodesSubset.includes(index)) {
-        console.log(`Peers for ${5001 + index}: `, peersSubset)
         environmentVariables.PEERS = peersSubset.join(',')
       }
     }
@@ -169,150 +167,164 @@ environmentArray.sort((a, b) => a.HTTP_PORT - b.HTTP_PORT)
 
 fs.writeFileSync(environmentFile, yaml.dump(environmentArray))
 
-const memory = '128Mi'
+const memory = '256Mi'
 const cpu = `${Number(CPU_LIMIT) * 1000}m`
-const k8sConfig = {
-  apiVersion: 'v1',
-  kind: 'List',
-  items: [
-    ...environmentArray.flatMap((environmentVariables, index) => [
-      {
-        apiVersion: 'v1',
-        kind: 'Pod',
-        metadata: {
-          name: `p2p-server-${index}`,
-          labels: { app: 'p2p-server', domain: 'blockchain' }
-        },
-        spec: {
-          containers: [
-            {
-              name: 'p2p-server',
-              image: 'lebaz20/blockchain-rapidchain-p2p-server:latest',
-              imagePullPolicy: 'IfNotPresent',
-              resources: {
-                limits: {
-                  memory,
-                  cpu
-                }
-              },
-              env: Object.entries(environmentVariables).map(([key, value]) => ({
-                name: key,
-                value: String(value)
-              })),
-              ports: [
-                {
-                  containerPort: environmentVariables.HTTP_PORT
-                    ? Number(environmentVariables.HTTP_PORT)
-                    : 3001
-                },
-                {
-                  containerPort: environmentVariables.P2P_PORT
-                    ? Number(environmentVariables.P2P_PORT)
-                    : 5001
-                }
-              ]
-            }
-          ],
-          restartPolicy: 'Never'
-        }
-      },
-      {
-        apiVersion: 'v1',
-        kind: 'Service',
-        metadata: {
-          name: `p2p-server-${index}`,
-          labels: { app: 'p2p-server', domain: 'blockchain' }
-        },
-        spec: {
-          clusterIP: 'None',
-          selector: {
-            app: 'p2p-server'
-          },
-          ports: [
-            {
-              name: environmentVariables.P2P_PORT.toString(),
-              protocol: 'TCP',
-              port: environmentVariables.P2P_PORT ? Number(environmentVariables.P2P_PORT) : 5001,
-              targetPort: environmentVariables.P2P_PORT
-                ? Number(environmentVariables.P2P_PORT)
-                : 5001
-            },
-            {
-              name: environmentVariables.HTTP_PORT.toString(),
-              protocol: 'TCP',
-              port: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001,
-              targetPort: environmentVariables.HTTP_PORT
-                ? Number(environmentVariables.HTTP_PORT)
-                : 3001
-            }
-          ]
-        }
-      }
-    ]),
+// Build array of individual k8s resources (pods + services).
+// Written as multi-document YAML (--- separators) instead of a single kind:List
+// so kubectl apply processes each resource individually — avoids API server
+// payload size limits that silently drop items at 512+ nodes.
+const k8sItems = [
+  ...environmentArray.flatMap((environmentVariables, index) => [
     {
       apiVersion: 'v1',
       kind: 'Pod',
       metadata: {
-        name: `core-server`,
-        labels: { app: 'core-server', domain: 'blockchain' }
+        name: `p2p-server-${index}`,
+        labels: { app: 'p2p-server', domain: 'blockchain' }
       },
       spec: {
+        ...(process.env.USE_HOST_NETWORK === 'true'
+          ? { hostNetwork: true, dnsPolicy: 'ClusterFirstWithHostNet' }
+          : {}),
         containers: [
           {
-            name: 'core-server',
-            image: 'lebaz20/blockchain-rapidchain-core-server:latest',
-            imagePullPolicy: 'IfNotPresent',
+            name: 'p2p-server',
+            image: 'lebaz20/blockchain-rapidchain-p2p-server:latest',
+            imagePullPolicy: 'Never',
             resources: {
               limits: {
                 memory,
                 cpu
               }
             },
-            env: [
+            env: Object.entries(environmentVariables).map(([key, value]) => ({
+              name: key,
+              value: String(value)
+            })),
+            ports: [
               {
-                name: 'SHOULD_REDIRECT_FROM_FAULTY_NODES',
-                value: String(SHOULD_REDIRECT_FROM_FAULTY_NODES)
+                containerPort: environmentVariables.HTTP_PORT
+                  ? Number(environmentVariables.HTTP_PORT)
+                  : 3001
               },
               {
-                name: 'COMMITTEE_SUBSET_INDEX',
-                value: String(committeeSubnetIndex)
-              },
-              {
-                name: 'BLOCK_THRESHOLD',
-                value: String(BLOCK_THRESHOLD)
+                containerPort: environmentVariables.P2P_PORT
+                  ? Number(environmentVariables.P2P_PORT)
+                  : 5001
               }
             ],
-            ports: [{ containerPort: coreServerPort }]
+            readinessProbe: {
+              httpGet: {
+                path: '/health',
+                port: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001
+              },
+              initialDelaySeconds: 10,
+              periodSeconds: 10,
+              timeoutSeconds: 5,
+              failureThreshold: 6
+            }
           }
         ],
-        restartPolicy: 'Never'
+        restartPolicy: 'OnFailure'
       }
     },
     {
       apiVersion: 'v1',
       kind: 'Service',
       metadata: {
-        name: 'core-server',
-        labels: { app: 'core-server', domain: 'blockchain' }
+        name: `p2p-server-${index}`,
+        labels: { app: 'p2p-server', domain: 'blockchain' }
       },
       spec: {
         clusterIP: 'None',
         selector: {
-          app: 'core-server'
+          app: 'p2p-server'
         },
         ports: [
           {
-            name: coreServerPort.toString(),
+            name: environmentVariables.P2P_PORT.toString(),
             protocol: 'TCP',
-            port: coreServerPort,
-            targetPort: coreServerPort
+            port: environmentVariables.P2P_PORT ? Number(environmentVariables.P2P_PORT) : 5001,
+            targetPort: environmentVariables.P2P_PORT ? Number(environmentVariables.P2P_PORT) : 5001
+          },
+          {
+            name: environmentVariables.HTTP_PORT.toString(),
+            protocol: 'TCP',
+            port: environmentVariables.HTTP_PORT ? Number(environmentVariables.HTTP_PORT) : 3001,
+            targetPort: environmentVariables.HTTP_PORT
+              ? Number(environmentVariables.HTTP_PORT)
+              : 3001
           }
         ]
       }
     }
-  ]
-}
-fs.writeFileSync(kubeFile, yaml.dump(k8sConfig))
+  ]),
+  {
+    apiVersion: 'v1',
+    kind: 'Pod',
+    metadata: {
+      name: `core-server`,
+      labels: { app: 'core-server', domain: 'blockchain' }
+    },
+    spec: {
+      ...(process.env.USE_HOST_NETWORK === 'true'
+        ? { hostNetwork: true, dnsPolicy: 'ClusterFirstWithHostNet' }
+        : {}),
+      containers: [
+        {
+          name: 'core-server',
+          image: 'lebaz20/blockchain-rapidchain-core-server:latest',
+          imagePullPolicy: 'Never',
+          resources: {
+            limits: {
+              memory,
+              cpu
+            }
+          },
+          env: [
+            {
+              name: 'SHOULD_REDIRECT_FROM_FAULTY_NODES',
+              value: String(SHOULD_REDIRECT_FROM_FAULTY_NODES)
+            },
+            {
+              name: 'COMMITTEE_SUBSET_INDEX',
+              value: String(committeeSubnetIndex)
+            },
+            {
+              name: 'BLOCK_THRESHOLD',
+              value: String(BLOCK_THRESHOLD)
+            }
+          ],
+          ports: [{ containerPort: coreServerPort }]
+        }
+      ],
+      restartPolicy: 'OnFailure'
+    }
+  },
+  {
+    apiVersion: 'v1',
+    kind: 'Service',
+    metadata: {
+      name: 'core-server',
+      labels: { app: 'core-server', domain: 'blockchain' }
+    },
+    spec: {
+      clusterIP: 'None',
+      selector: {
+        app: 'core-server'
+      },
+      ports: [
+        {
+          name: coreServerPort.toString(),
+          protocol: 'TCP',
+          port: coreServerPort,
+          targetPort: coreServerPort
+        }
+      ]
+    }
+  }
+]
+fs.writeFileSync(kubeFile, k8sItems.map((item) => yaml.dump(item)).join('---\n'))
 
 // Exclude faulty nodes from JMeter targeting — they accept TX but never commit
 // them, so including them introduces random variance based on how many faulty

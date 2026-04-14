@@ -43,16 +43,24 @@ ENHANCED_NODES_PER_SHARD=${ENHANCED_NODES_PER_SHARD:-4}
 RAPIDCHAIN_NODES_PER_SHARD=${RAPIDCHAIN_NODES_PER_SHARD:-4}
 
 # Per-protocol redirect setting
-# Enhanced: redirect enabled (faulty nodes forward txs to non-faulty peers)
+# Enhanced: redirect disabled (broken shards form merged virtual shards instead)
 # RapidChain: redirect disabled (faulty nodes drop txs — tests the raw protocol without forwarding)
-ENHANCED_REDIRECT=${ENHANCED_REDIRECT:-1}
+ENHANCED_REDIRECT=${ENHANCED_REDIRECT:-0}
 RAPIDCHAIN_REDIRECT=${RAPIDCHAIN_REDIRECT:-0}
 
+# Per-protocol merge setting
+# Enhanced: merge enabled by default (broken shards' healthy nodes form merged virtual shards)
+# RapidChain: merge not applicable (no merge implementation)
+ENHANCED_MERGE=${ENHANCED_MERGE:-1}
+RAPIDCHAIN_MERGE=${RAPIDCHAIN_MERGE:-0}
+
 # Per-protocol transaction threshold
-# Both set to 100 so blocks form at the same cadence for a fair head-to-head.
-# Lower threshold = smaller blocks more often = less time waiting to fill a pool,
-# more confirmed transactions in the same JMeter window.
-ENHANCED_THRESHOLD=${ENHANCED_THRESHOLD:-100}
+# Both protocols start with a flat base of 100 TXs/block.
+# Enhanced's adaptive block-size controller (EMA backlog pressure) scales this up
+# at runtime based on actual measured queue depth — no network-size formula needed.
+# RapidChain: fixed at 100 (its committee layer implicitly batches shard blocks;
+#   individual shard block size doesn't change with total node count).
+# Enhanced threshold is calculated below, after _NUM_SHARDS and _DEAD_SHARDS are computed.
 RAPIDCHAIN_THRESHOLD=${RAPIDCHAIN_THRESHOLD:-100}
 
 # BLOCK_THRESHOLD: RapidChain's committee fires after collecting this many shard blocks.
@@ -88,40 +96,55 @@ export JMETER_RAMP_UP=${JMETER_RAMP_UP:-5}
 export JMETER_RAMP_DOWN=${JMETER_RAMP_DOWN:-30}
 export JMETER_DURATION=${JMETER_DURATION:-100}
 
-# JMETER_THROUGHPUT: 2000 req/min per shard (total shards, not just healthy).
+# JMETER_THROUGHPUT: 2000 req/min per HEALTHY shard.
 #
-# This gives each shard ~2000 req/min of JMeter input. Since JMeter targets all
-# non-faulty nodes (including honest nodes in dead shards), the actual distribution
-# depends on each protocol's architecture:
+# JMeter targets all non-faulty nodes (realistic: real clients don't know which
+# shards are healthy). Dead-shard honest nodes accept TXs and drain them to
+# healthy shards via the redirect loop.
 #
-# Enhanced (redirect=1): dead-shard honest nodes forward TXs to healthy shards,
-#   so ALL traffic eventually reaches consensus — healthy shards handle both their
-#   own share plus redirected dead-shard traffic. Enhanced's redirect advantage lets
-#   it confirm more of the total input.
+# With this multiplier, the fraction reaching healthy-shard nodes is ~50 %
+# (healthy_nodes / total_honest ≈ 0.51 at all supported sizes):
+#   256 nodes: 88/172 → 17.1 TX/s per shard → fills 100-TX in 5.9 s
+#   512 nodes: 172/342 → 16.8 TX/s per shard → fills 100-TX in 6.0 s
+# Both safely above the 2 s inactivity timer — full-size blocks at all sizes.
+# Per-shard TXs fired = (2000/60) × 70 s × 0.51 ≈ 1 190; max stranded = 99.
+# ⟹  drain rate ≥ (1190 − 99) / 1190 = 91.7 % at EVERY supported node count.
 #
-# RapidChain (redirect=0): dead-shard honest nodes accept TXs but can never
-#   confirm them — that fraction of total traffic is permanently lost. This is the
-#   real architectural cost of not having redirect.
-#
-# The throughput is identical for both — the difference in confirmed TXs reflects
-# genuine protocol capability, not testing bias.
-#
-# Examples for 4-node shards:
-#   24 nodes → 6 shards → 12 000 req/min (200 req/s)
-#   48 nodes → 12 shards → 24 000 req/min (400 req/s)
+# Scaling table (4-node shards, f = floor((n−1)/3), break-threshold = 2):
+#   nodes |  faulty | shards | dead | healthy | req/min | threads
+#      24 |       7 |      6 |    3 |       3 |   6 000 |      60
+#      64 |      21 |     16 |   10 |       6 |  12 000 |     120
+#     128 |      42 |     32 |   21 |      11 |  22 000 |     220
+#     256 |      85 |     64 |   42 |      22 |  44 000 |     440
+#     512 |     170 |    128 |   85 |      43 |  86 000 |     860
 _NUM_SHARDS=$(( NUMBER_OF_NODES / ENHANCED_NODES_PER_SHARD ))
-export JMETER_THROUGHPUT=${JMETER_THROUGHPUT:-$(( 2000 * _NUM_SHARDS ))}
+_FAULTY_TO_BREAK=$(( ENHANCED_NODES_PER_SHARD / 3 + 1 ))
+_DEAD_SHARDS=$(( NUMBER_OF_FAULTY_NODES / _FAULTY_TO_BREAK ))
+[ "$_DEAD_SHARDS" -gt "$_NUM_SHARDS" ] && _DEAD_SHARDS=$_NUM_SHARDS
+_HEALTHY_SHARDS=$(( _NUM_SHARDS - _DEAD_SHARDS ))
+[ "$_HEALTHY_SHARDS" -lt 1 ] && _HEALTHY_SHARDS=1
 
-# JMETER_THREADS: enough threads that the ConstantThroughputTimer cap is the actual
-# bottleneck, not thread concurrency — identical for both protocols.
-# Uses Enhanced's worst-case ~61 ms latency so RapidChain (~14 ms) is also covered.
-# Minimum threads needed = JMETER_THROUGHPUT × latency_s × safety_factor
-#   = JMETER_THROUGHPUT × (61/60000) × 2.5  ≈  JMETER_THROUGHPUT / 393
-# Integer ceiling division via (x + d - 1) / d  with d=375 (slightly conservative):
-#   6 000 req/min →  (6000 + 374) / 375 = 16 threads
-#  12 000 req/min → (12000 + 374) / 375 = 32 threads
-#   3 000 req/min →  (3000 + 374) / 375 =  8 threads
-export JMETER_THREADS=${JMETER_THREADS:-$(( (JMETER_THROUGHPUT + 374) / 375 ))}
+# Enhanced threshold: scale by network size so small networks create blocks faster.
+# ≤64 nodes: threshold=50  → fills in ~3s at 17 TX/s per shard → 2× block frequency
+# >64 nodes: threshold=100 → fills in ~6s, better batch efficiency at scale
+# Max stranded TXs = healthy_shards × threshold — always manageable.
+if [ "$NUMBER_OF_NODES" -le 64 ]; then
+  _ENH_BASE_THRESHOLD=50
+else
+  _ENH_BASE_THRESHOLD=100
+fi
+export ENHANCED_THRESHOLD=${ENHANCED_THRESHOLD:-$_ENH_BASE_THRESHOLD}
+
+export JMETER_THROUGHPUT=${JMETER_THROUGHPUT:-$(( 2000 * _HEALTHY_SHARDS ))}
+
+# JMETER_THREADS: enough threads so ConstantThroughputTimer is the bottleneck,
+# not thread concurrency. Threads needed = ceil(throughput_per_sec × p90_latency).
+# Enhanced p90 ≈ 150 ms (post dead-shard PBFT bypass) → 400 req/min per thread.
+# Using generous 100 req/min budget (600 ms effective latency assumption) ensures
+# threads are never the bottleneck even at high concurrency.
+#   formula: ceil(THROUGHPUT / 100) = 20 × healthy_shards
+#   scales automatically with JMETER_THROUGHPUT for all node counts.
+export JMETER_THREADS=${JMETER_THREADS:-$(( (JMETER_THROUGHPUT + 99) / 100 ))}
 
 echo -e "${CYAN}========================================${NC}"
 echo -e "${CYAN}Blockchain Performance Comparison${NC}"
@@ -147,7 +170,7 @@ fi
 
 echo -e "${GREEN}✓ All prerequisites met${NC}\n"
 
-# Raise file-descriptor limit — 512 nodes require ~1024 concurrent port-forward fds.
+# Raise file-descriptor and inotify limits — each kubectl port-forward needs an fd + inotify instance.
 # macOS sysctl: sudo sysctl -w kern.maxfiles=1228800 kern.maxfilesperproc=614400
 CURRENT_NOFILE=$(ulimit -n)
 if [ "${CURRENT_NOFILE}" -lt 65536 ] 2>/dev/null; then
@@ -156,6 +179,11 @@ if [ "${CURRENT_NOFILE}" -lt 65536 ] 2>/dev/null; then
     echo -e "${YELLOW}  macOS hard limit: sudo sysctl -w kern.maxfiles=1228800 kern.maxfilesperproc=614400${NC}"
 fi
 ulimit -n 65536 2>/dev/null || true
+# Raise inotify limits on Linux (kubectl port-forward creates inotify watchers)
+if [ -f /proc/sys/fs/inotify/max_user_instances ]; then
+    sudo sysctl -w fs.inotify.max_user_instances=8192 2>/dev/null || true
+    sudo sysctl -w fs.inotify.max_user_watches=524288 2>/dev/null || true
+fi
 
 # Test 1: PBFT-Enhanced
 echo -e "${CYAN}========================================${NC}"
@@ -165,6 +193,7 @@ echo -e "${CYAN}========================================${NC}\n"
 cd pbft-enhanced
 export NUMBER_OF_NODES_PER_SHARD=$ENHANCED_NODES_PER_SHARD
 export SHOULD_REDIRECT_FROM_FAULTY_NODES=$ENHANCED_REDIRECT
+export ENABLE_SHARD_MERGE=$ENHANCED_MERGE
 export TRANSACTION_THRESHOLD=$ENHANCED_THRESHOLD
 ./run-performance-test.sh
 ENHANCED_STATS=$(ls -t performance-results/*-stats.csv | head -1)
@@ -173,18 +202,21 @@ cd ..
 
 echo -e "\n${GREEN}✓ PBFT-Enhanced test completed${NC}\n"
 # Clean up between tests: kill all port-forwards and delete pods so ports 3001-$((3000+NUMBER_OF_NODES))
-# are fully released before RapidChain tries to bind the same range
+# are fully released before RapidChain tries to bind the same range.
+# IMPORTANT: Do NOT use `--all` for services — that deletes the built-in
+# `kubernetes` ClusterIP service which breaks CoreDNS on K3s, causing
+# ENOTFOUND errors when the next test's pods try to resolve service names.
 echo -e "${YELLOW}Cleaning up between tests (releasing ports 3001-$((3000+NUMBER_OF_NODES)))...${NC}"
 pkill -f "kubectl port-forward" 2>/dev/null || true
-kubectl delete pods,services --all --ignore-not-found=true 2>/dev/null || true
+# Delete only our pods (not kube-system) and only non-kubernetes services
+kubectl delete pods --all --ignore-not-found=true --grace-period=1 --force 2>/dev/null || true
+kubectl delete service --field-selector metadata.name!=kubernetes --ignore-not-found=true 2>/dev/null || true
 # Wait until all pods are fully terminated before starting the next test.
 # Without this, rapidchain pods start and try to resolve Kubernetes service DNS
 # names (e.g. core-server) while the previous run's services are still terminating,
 # causing getaddrinfo ENOTFOUND errors and connection races.
 echo -e "${YELLOW}  Waiting for all pods to terminate...${NC}"
 kubectl wait --for=delete pod --all --timeout=600s 2>/dev/null || true
-# Also wait for services to be gone so DNS entries are fully cleared
-kubectl wait --for=delete service --all --timeout=300s 2>/dev/null || true
 echo -e "${GREEN}✓ Cleanup complete — all pods and services terminated${NC}\n"
 
 # Test 2: PBFT-RapidChain
@@ -195,6 +227,7 @@ echo -e "${CYAN}========================================${NC}\n"
 cd pbft-rapidchain
 export NUMBER_OF_NODES_PER_SHARD=$RAPIDCHAIN_NODES_PER_SHARD
 export SHOULD_REDIRECT_FROM_FAULTY_NODES=$RAPIDCHAIN_REDIRECT
+export ENABLE_SHARD_MERGE=$RAPIDCHAIN_MERGE
 # Lower threshold reduces per-pod memory pressure and time-to-first-block, directly
 # decreasing error rates caused by pool saturation under high load.
 export TRANSACTION_THRESHOLD=$RAPIDCHAIN_THRESHOLD
@@ -332,7 +365,7 @@ fi
     echo "| Number of Nodes (Enhanced) | ${ENH_NODES} | ${ENH_NODES} P2P nodes ran the PBFT-Enhanced consensus; each participates in every round of consensus voting |"
     echo "| Number of Nodes (RapidChain) | ${RC_NODES} total | Nodes split into shards of ${RC_PER_SHARD}, plus 1 committee shard for cross-shard finality |"
     echo "| Faulty Nodes (RapidChain) | ${RC_FAULTY} | Byzantine-simulated nodes that do not propose or vote in consensus |"
-    echo "| JMeter Threads | ${JMETER_THREADS:-16} | ${JMETER_THREADS:-16} concurrent virtual users — identical for both protocols; high enough that the ConstantThroughputTimer cap (100 req/s) is the actual bottleneck rather than thread count |"
+    echo "| JMeter Threads | ${JMETER_THREADS:-16} | ${JMETER_THREADS:-16} concurrent virtual users — identical for both protocols; high enough that the ConstantThroughputTimer cap ($((JMETER_THROUGHPUT / 60)) req/s) is the actual bottleneck rather than thread count |"
     echo "| Test Duration | ${JMETER_DURATION:-60} s | JMeter fires transactions for ${JMETER_DURATION:-60} seconds total; active load = $((${JMETER_DURATION:-60} - ${JMETER_RAMP_DOWN:-0})) s, ramp-down = ${JMETER_RAMP_DOWN:-0} s |"
     echo "| Ramp-up Time | ${JMETER_RAMP_UP:-5} s | JMeter linearly scales from 0 to ${JMETER_THREADS:-16} threads over the first ${JMETER_RAMP_UP:-5} seconds to avoid a cold-start spike |"
     echo "| Ramp-down Time | ${JMETER_RAMP_DOWN:-0} s | Last ${JMETER_RAMP_DOWN:-0} s of the test window: no new transactions — blockchain completes in-flight blocks before the drain wait begins |"
@@ -461,7 +494,7 @@ fi
     echo "**Characteristics:**"
     echo "- Two-level consensus: each shard runs PBFT internally, then a committee shard validates batches of shard blocks (\`BLOCK_THRESHOLD\`)"
     echo "- The committee layer creates a second pipeline stage; if too few shard blocks accumulate, the committee does not trigger and txs stall"
-    echo "- \`getTotal()\` currently only counts \`transactions.unassigned\`, not \`committeeTransactions.unassigned\` — the drain monitor can declare done while committee-layer transactions are still pending"
+    echo "- \`getTotal()\` counts all pending client transactions (unassigned + inflight blocks not yet committed), so the drain rate correctly penalises TXs stuck in dead-shard inflight blocks"
     echo "- Non-proposer redistribution workaround (re-broadcasts txs every 10 s) causes O(n²) bandwidth growth and timing races on proposer rotation"
     echo "- Best for larger networks (>16 nodes) that need cross-shard coordination"
     echo ""

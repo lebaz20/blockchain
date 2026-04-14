@@ -14,6 +14,11 @@ function loadConfig() {
     ? parseInt(process.env.TRANSACTION_THRESHOLD, 10)
     : 5
 
+  // Immutable baseline — adaptive logic in p2pserver.js may raise TRANSACTION_THRESHOLD
+  // at runtime to batch more TXs per block under heavy load. BASE_TRANSACTION_THRESHOLD
+  // is never mutated so the scaling formula always has a stable reference point.
+  const BASE_TRANSACTION_THRESHOLD = TRANSACTION_THRESHOLD
+
   // Maximum number of transactions sent per redirect drain cycle.
   // Decoupled from TRANSACTION_THRESHOLD so broken shards can flush larger backlogs
   // in one HTTP round-trip while healthy shards still form smaller, faster blocks.
@@ -31,13 +36,43 @@ function loadConfig() {
   const NUMBER_OF_NODES = process.env.NUMBER_OF_NODES
     ? parseInt(process.env.NUMBER_OF_NODES, 10)
     : 8
+
+  // NUMBER_OF_FAULTY_NODES declared here because POOL_CAPACITY derivation needs it.
+  const NUMBER_OF_FAULTY_NODES = process.env.NUMBER_OF_FAULTY_NODES
+    ? parseInt(process.env.NUMBER_OF_FAULTY_NODES, 10)
+    : 0
+
+  // Maximum unassigned TXs a healthy shard will accept via redirect before returning 503.
+  //
+  // Derived from shard topology and drain-loop dynamics — not trial and error:
+  //   faulty_per_break   = floor(NODES_PER_SHARD/3) + 1   — minimum faulty nodes to break a shard
+  //   broken_shards      = floor(FAULTY_NODES / faulty_per_break)
+  //   honest_per_broken  = NODES_PER_SHARD - faulty_per_break  — each runs one drain loop
+  //   redirect_rate/shard = (broken × honest_per_broken / healthy) × DRAIN_BATCH_SIZE × 2
+  //     where ×2 comes from 1000 ms / 500 ms drain interval (appP2p.js DRAIN_INTERVAL_MS)
+  //   POOL_CAPACITY = redirect_rate × 30 s — gives EMA time to scale blocks to 10× THRESHOLD
+  //   so consensus drain rate overtakes the redirect inflow before the pool fills.
+  //   Floor of THRESHOLD × 20 applies when there are no faulty nodes.
+  //     N=24 → ~2000+   N=128 → ~22 900   N=512 → ~23 700
+  const _faultyPerBreak = Math.floor(NUMBER_OF_NODES_PER_SHARD / 3) + 1
+  const _honestPerBroken = NUMBER_OF_NODES_PER_SHARD - _faultyPerBreak
+  const _brokenShards = Math.floor(NUMBER_OF_FAULTY_NODES / _faultyPerBreak)
+  const _healthyShards = Math.max(
+    1,
+    Math.floor(NUMBER_OF_NODES / NUMBER_OF_NODES_PER_SHARD) - _brokenShards
+  )
+  // 500 ms drain interval (appP2p.js DRAIN_INTERVAL_MS) → 2 cycles/s
+  const _redirectRatePerShard =
+    ((_brokenShards * _honestPerBroken) / _healthyShards) * DRAIN_BATCH_SIZE * 2
+  const POOL_CAPACITY = process.env.POOL_CAPACITY
+    ? parseInt(process.env.POOL_CAPACITY, 10)
+    : Math.max(TRANSACTION_THRESHOLD * 20, Math.ceil(_redirectRatePerShard * 30))
+
   const NODES_SUBSET = process.env.NODES_SUBSET ? JSON.parse(process.env.NODES_SUBSET) : []
 
   const SHOULD_REDIRECT_FROM_FAULTY_NODES = process.env.SHOULD_REDIRECT_FROM_FAULTY_NODES === 'true'
+  const ENABLE_SHARD_MERGE = process.env.ENABLE_SHARD_MERGE === 'true'
   const IS_FAULTY = process.env.IS_FAULTY === 'true'
-
-  // improve performance by using a subset of nodes in the network
-  const NUMBER_OF_FAULTY_NODES = process.env.NUMBER_OF_FAULTY_NODES || 0
 
   // Minimum number of positive votes required for the message/block to be valid
   // Standard PBFT safety threshold: 2f+1 where f = floor((n-1)/3)
@@ -64,7 +99,9 @@ function loadConfig() {
 
   const config = {
     TRANSACTION_THRESHOLD,
+    BASE_TRANSACTION_THRESHOLD,
     DRAIN_BATCH_SIZE,
+    POOL_CAPACITY,
     NUMBER_OF_NODES_PER_SHARD,
     NUMBER_OF_NODES,
     NUMBER_OF_FAULTY_NODES,
@@ -75,6 +112,7 @@ function loadConfig() {
     REDIRECT_TO_URL,
     IS_FAULTY,
     SHOULD_REDIRECT_FROM_FAULTY_NODES,
+    ENABLE_SHARD_MERGE,
     DEFAULT_TTL,
     VERIFICATION_SOURCE_SUBSETS
   }
@@ -82,11 +120,31 @@ function loadConfig() {
   return config
 }
 
+// Cache config in memory to avoid sync FS reads on every get() call.
+// Invalidated on set() and on file changes (fs.watch).
+let _cachedConfig = null
+
+try {
+  fs.watch(CONFIG_PATH, () => {
+    _cachedConfig = null
+  })
+} catch {
+  /* file may not exist yet at startup */
+}
+
 module.exports = {
-  get: () => loadConfig(),
+  get: () => {
+    if (!_cachedConfig) _cachedConfig = loadConfig()
+    return _cachedConfig
+  },
   set: (key, value) => {
-    const config = loadConfig()
+    const config = _cachedConfig || loadConfig()
+    // Skip synchronous filesystem write when value is unchanged — this path
+    // fires on every block round (EMA reset) and was blocking the event loop
+    // with 640+ writeFileSync calls/min at 32 shards.
+    if (config[key] === value) return
     config[key] = value
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    _cachedConfig = config
   }
 }

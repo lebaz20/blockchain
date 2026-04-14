@@ -100,24 +100,6 @@ class P2pserver {
     setInterval(async () => {
       const rate = await this.blockchain.getRate(this.sockets.peers)
       const total = this.blockchain.getTotal()
-      logger.log(
-        `PEERS ${SUBSET_INDEX}`,
-        P2P_PORT,
-        IS_FAULTY,
-        JSON.stringify(
-          Object.keys(this.sockets.peers).map((port) => ({
-            port,
-            isFaulty: this.sockets.peers[port].isFaulty
-          }))
-        )
-      )
-      logger.log(
-        `COMMITTEE PEERS`,
-        P2P_PORT,
-        JSON.stringify(Object.keys(this.sockets.committeePeers).map((port) => ({ port })))
-      )
-      logger.log(`RATE INTERVAL BROADCAST ${SUBSET_INDEX}`, JSON.stringify(rate))
-      logger.log(`TOTAL INTERVAL BROADCAST ${SUBSET_INDEX}`, JSON.stringify(total))
       this.broadcastRateToCore(rate, total)
     }, TIMEOUTS.RATE_BROADCAST_INTERVAL_MS)
   }
@@ -467,7 +449,15 @@ class P2pserver {
       // a proper architectural solution. It sacrifices efficiency for availability.
       // ============================================================================
       if (!isProposer && unassignedCount >= TRANSACTION_THRESHOLD / 2) {
-        logger.log(P2P_PORT, 'NON-PROPOSER WITH MANY TXs - Redistributing:', unassignedCount)
+        const _seenSize = isCommittee
+          ? this.transactionPool.committeeTransactionIds.size
+          : this.transactionPool.transactionIds.size
+        logger.log(
+          P2P_PORT,
+          `REDISTRIBUTE shard=${SUBSET_INDEX} unassigned=${unassignedCount}` +
+            ` seenIndex=${_seenSize} isCommittee=${isCommittee}` +
+            ` isProposer=${isProposer} isInactive=${isInactive}`
+        )
         const txArray = isCommittee
           ? this.transactionPool.committeeTransactions.unassigned
           : this.transactionPool.transactions.unassigned
@@ -556,6 +546,18 @@ class P2pserver {
       ? this.transactionPool.committeeTransactions.unassigned
       : this.transactionPool.transactions.unassigned
 
+    // Defence-in-depth: purge any already-committed TXs that landed back in
+    // unassigned via the safety-reassignment timer or releaseAssigned().
+    const _committedSet = isCommittee
+      ? this.transactionPool.committedCommitteeTxIds
+      : this.transactionPool.committedTxIds
+    if (_committedSet.size > 0) {
+      const pool = isCommittee
+        ? this.transactionPool.committeeTransactions
+        : this.transactionPool.transactions
+      pool.unassigned = pool.unassigned.filter((tx) => !_committedSet.has(tx.id))
+    }
+
     const previousBlock = inflightBlocks.length > 1 ? lastUnpersistedBlock : undefined
     const transactionsBatch = unassignedTransactions.splice(0, threshold)
     const block = this.blockchain.createBlock(
@@ -598,7 +600,7 @@ class P2pserver {
         const unassignedCount = isCommittee
           ? this.transactionPool.committeeTransactions.unassigned.length
           : this.transactionPool.transactions.unassigned.length
-        logger.log(
+        logger.debug(
           P2P_PORT,
           'Transaction Threshold NOT REACHED, TOTAL UNASSIGNED NOW:',
           unassignedCount
@@ -711,8 +713,9 @@ class P2pserver {
 
   _handleTransaction(data, isCommittee) {
     const activeValidators = isCommittee ? this.committeeValidators : this.validators
+    const _exists = this.transactionPool.transactionExists(data.transaction, isCommittee)
     if (
-      !this.transactionPool.transactionExists(data.transaction, isCommittee) &&
+      !_exists &&
       this.transactionPool.verifyTransaction(data.transaction) &&
       activeValidators.isValidValidator(data.transaction.from)
     ) {
@@ -729,6 +732,12 @@ class P2pserver {
       )
       this.broadcastTransaction(data.port, data.transaction, isCommittee)
       this.initiateBlockCreation(data.port, false, isCommittee)
+    } else if (_exists) {
+      logger.debug(
+        P2P_PORT,
+        `TX_DUPLICATE_REJECTED id=${data.transaction.id?.slice(0, 8)} shard=${SUBSET_INDEX}` +
+          ` seenIndex=${isCommittee ? this.transactionPool.committeeTransactionIds.size : this.transactionPool.transactionIds.size}`
+      )
     }
   }
 
@@ -839,6 +848,16 @@ class P2pserver {
           const _pendingCount = isCommittee
             ? this.transactionPool.committeeTransactions.unassigned.length
             : this.transactionPool.transactions.unassigned.length
+          const _seenSize = isCommittee
+            ? this.transactionPool.committeeTransactionIds.size
+            : this.transactionPool.transactionIds.size
+          logger.log(
+            P2P_PORT,
+            `BLOCK COMMITTED shard=${SUBSET_INDEX} block=#${data.commit.blockHash.slice(0, 8)}` +
+              ` txInBlock=${result.data.length} pendingAfter=${_pendingCount}` +
+              ` seenIndex=${_seenSize} chainLen=${chainLength}` +
+              ` isCommittee=${isCommittee}`
+          )
           if (_pendingCount > 0) {
             this.initiateBlockCreation(P2P_PORT, false, isCommittee)
           }
