@@ -96,3 +96,39 @@ out/
 
 # ── macOS ─────────────────────────────────────────────────────────────────────
 .DS_Store
+
+# ── Thesis / paper materials (kept out of this repo) ──────────────────────────
+/thesis/
+/conference_101719.tex
+/Blockchain*.md
+/Blockchain*.pdf
+/RUN_AND_INTEGRATE.md
+
+# ── Claude Code local settings ────────────────────────────────────────────────
+/.claude/
+
+# ── AWS multi-node run outputs (JMeter dashboards, CSVs, logs) ────────────────
+custom-consensus/multi-ec2-results-*/
+custom-consensus/journal-grid-*/
+
+# ── custom-consensus operational notes (kept locally, not in repo) ────────────
+custom-consensus/AWS_QUOTA_REQUEST.md
+custom-consensus/COMPARISON_FINAL.md
+custom-consensus/INVESTIGATION_JOURNAL.md
+custom-consensus/REFACTORING_SUMMARY.md
+
+# ── Third-party artifact directory ────────────────────────────────────────────
+/enhancedbft-artifact/
+
+# ── Backup files ──────────────────────────────────────────────────────────────
+*.bak
+
+# ── LaTeX build artifacts ─────────────────────────────────────────────────────
+*.aux
+*.fdb_latexmk
+*.fls
+*.lof
+*.lot
+*.out
+*.synctex.gz
+*.toc

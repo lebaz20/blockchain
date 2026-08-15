@@ -140,6 +140,11 @@ class P2pserver {
     await Promise.all(
       nodes.map((peer) => this.waitForWebServer(peer.replace('ws', 'http').replace(':5', ':3')))
     )
+    // Startup jitter: spread each pod's outbound WS burst across STARTUP_JITTER_MS
+    // so the Node.js event loop doesn't saturate on ~N concurrent WS upgrades at
+    // large NUMBER_OF_NODES_PER_SHARD. Matches pbft-rapidchain's jitter so the
+    // two systems share identical transport plumbing.
+    const STARTUP_JITTER_MS = Number(process.env.STARTUP_JITTER_MS || 15000)
     nodes.forEach((peer) => {
       const peerPort = peer.split(':')[2]
       const connectPeer = () => {
@@ -168,7 +173,8 @@ class P2pserver {
           this.messageHandler(socket, false)
         })
       }
-      connectPeer()
+      // Initial jitter only — reconnects use fixed PEER_RECONNECT_DELAY_MS.
+      setTimeout(connectPeer, Math.floor(Math.random() * STARTUP_JITTER_MS))
     })
   }
 
@@ -899,7 +905,10 @@ class P2pserver {
     // Sub-threshold drain: if this node is the proposer and ready, create a
     // block with whatever TX are available instead of waiting for view-change
     // quorum that can never produce a block (threshold will never be reached).
-    if (isProposer && this._canProposeBlock()) {
+    // STRICT_BLOCK_THRESHOLD skips this so enhanced never emits a sub-threshold
+    // block — matches RapidChain's fire-only-when-full policy for benchmarks.
+    const { STRICT_BLOCK_THRESHOLD: _strictInactivity } = config.get()
+    if (!_strictInactivity && isProposer && this._canProposeBlock()) {
       logger.log(
         P2P_PORT,
         `PROPOSING BLOCK shard=${SUBSET_INDEX} txCount=${this.transactionPool.transactions.unassigned.length} path=inactivity viewOffset=${this._viewOffset || 0}`
@@ -961,9 +970,11 @@ class P2pserver {
       this.blockchain.getProposer(undefined, this._viewOffset || 0).proposer ===
       this.wallet.getPublicKey()
     const unassigned = this.transactionPool.transactions.unassigned.length
-    const { TRANSACTION_THRESHOLD: _th } = config.get()
+    const { TRANSACTION_THRESHOLD: _th, STRICT_BLOCK_THRESHOLD: _strict } = config.get()
     // Propose immediately when draining OR when pool has a meaningful payload.
-    const shouldProposeNow = isDraining || unassigned >= Math.ceil(_th / 4)
+    // STRICT mode: disable both fast-paths — enhanced only proposes when pool
+    // is truly full (matches RapidChain for tx-per-block parity in benchmarks).
+    const shouldProposeNow = _strict ? false : (isDraining || unassigned >= Math.ceil(_th / 4))
 
     if (shouldProposeNow && isProposer && this._canProposeBlock()) {
       logger.log(

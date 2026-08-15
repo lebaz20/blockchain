@@ -11,17 +11,23 @@
 #   --aws-secret-key     AWS_SECRET_ACCESS_KEY      (or set env var)
 #   --aws-region         AWS region  [default: us-east-1]
 #   --instance-type      EC2 type    [default: auto-selected by --nodes]
-#                        Auto-defaults:  ≤8  → c6i.xlarge (4 vCPU)
-#                                       ≤16 → c6i.2xlarge (8 vCPU)
-#                                       ≤32 → c6i.4xlarge (16 vCPU)
-#                                       ≤64 → c6i.8xlarge (32 vCPU)
-#                                      ≤128 → c6i.16xlarge (64 vCPU)
-#                                       >128 → c6i.32xlarge (128 vCPU)
+#                        Auto-defaults (sized for fixed 0.30 vCPU/pod):
+#                                       ≤16  → c6i.2xlarge  (8 vCPU)
+#                                       ≤32  → c6i.4xlarge  (16 vCPU)
+#                                       ≤64  → c6i.8xlarge  (32 vCPU)
+#                                       ≤100 → c6i.16xlarge (64 vCPU)
+#                                       ≤200 → c6i.24xlarge (96 vCPU)
+#                                       ≤300 → c6i.32xlarge (128 vCPU)
+#                                       >300 → c7i.48xlarge (192 vCPU)
 #   --nodes              NUMBER_OF_NODES            [default: 24]
 #   --faulty             NUMBER_OF_FAULTY_NODES     [default: floor((nodes-1)/3)]
+#   --cpu-per-pod        vCPU per pod               [default: 0.30]
+#                        Used to size the EC2 instance (total = N × cpu × 1.25).
+#                        Set higher for large shards (100-node shards need ≥1.5).
 #   --key-name           Existing EC2 key pair name (optional; one is created
 #                        automatically if omitted and deleted on cleanup)
-#   --on-demand          Use On-Demand pricing instead of Spot (Spot is default; ~70% cheaper)
+#   --spot               Use Spot pricing (~70% cheaper, but can be reclaimed mid-run).
+#                        Default is On-Demand for benchmark stability.
 #   --merge              Enable shard merging for enhanced protocol (default)
 #   --no-merge           Disable shard merging for enhanced protocol
 #   --keep-instance      Don't terminate EC2 after test (for debugging)
@@ -48,7 +54,9 @@ AWS_REGION="${AWS_REGION:-us-east-1}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-}"   # empty = auto-select by node count
 NUMBER_OF_NODES="${NUMBER_OF_NODES:-24}"
 NUMBER_OF_FAULTY_NODES="${NUMBER_OF_FAULTY_NODES:-}"
-USE_SPOT=true
+CPU_PER_POD="${CPU_PER_POD:-0.30}"
+POD_MEMORY_MIB="${POD_MEMORY_MIB:-256}"
+USE_SPOT=false   # On-Demand by default; pass --spot to opt back into Spot pricing
 ENHANCED_MERGE=1
 KEEP_INSTANCE=false
 SKIP_UPLOAD=false
@@ -63,6 +71,61 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 RESULTS_DIR="${SCRIPT_DIR}/performance-results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
+# ─── remote heartbeat: compact status every REMOTE_HEARTBEAT_INTERVAL seconds ─
+# Runs in the background during long silent stages (docker build, test run).
+# Uses a fresh SSH connection (no ControlMaster) so it survives even when the
+# primary interactive SSH session stalls. Prints one line: current phase file
+# on the remote, k3s pod counts, port-forward count, load average, memory.
+REMOTE_HEARTBEAT_INTERVAL="${REMOTE_HEARTBEAT_INTERVAL:-60}"
+REMOTE_HEARTBEAT_PID=""
+
+remote_heartbeat_start() {
+    local label="$1"
+    # Only start after PUBLIC_IP and KEY_FILE are known.
+    if [[ -z "${PUBLIC_IP:-}" || -z "${KEY_FILE:-}" || ! -f "${KEY_FILE:-/dev/null}" ]]; then
+        return 0
+    fi
+    local start_ts
+    start_ts=$(date +%s)
+    # Fresh connection each tick (no ControlMaster) so this survives a stuck
+    # main session. BatchMode=yes prevents interactive prompts on host key change.
+    local hb_ssh_opts="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes -i $KEY_FILE"
+    (
+        while sleep "$REMOTE_HEARTBEAT_INTERVAL"; do
+            local elapsed=$(( $(date +%s) - start_ts ))
+            local remote_status
+            remote_status=$(ssh $hb_ssh_opts "ec2-user@${PUBLIC_IP}" '
+                phase=$(cat /tmp/bftperf-phase-* 2>/dev/null | tail -1 | tr -d "\n")
+                phase="${phase:-(no phase set)}"
+                if command -v kubectl >/dev/null 2>&1 && [ -f /home/ec2-user/.kube/config ]; then
+                    pods_running=$(KUBECONFIG=/home/ec2-user/.kube/config kubectl get pods -A --no-headers 2>/dev/null | grep -c Running)
+                    pods_total=$(KUBECONFIG=/home/ec2-user/.kube/config kubectl get pods -A --no-headers 2>/dev/null | wc -l | tr -d " ")
+                else
+                    pods_running=0; pods_total=0
+                fi
+                pf_count=$(pgrep -f "kubectl port-forward" 2>/dev/null | wc -l | tr -d " ")
+                loadavg=$(awk "{print \$1\",\"\$2\",\"\$3}" /proc/loadavg 2>/dev/null)
+                mem=$(free -m 2>/dev/null | awk "/Mem:/ {printf \"%d/%dMB\", \$3, \$2}")
+                # Last 2 log lines from the current comparison run (if it exists)
+                last_log=$(tail -2 /tmp/comparison-run.log 2>/dev/null | tr "\n" " | " | cut -c1-160)
+                echo "phase=[$phase] pods=$pods_running/$pods_total pf=$pf_count load=$loadavg mem=$mem"
+                [ -n "$last_log" ] && echo "  tail: $last_log"
+            ' 2>/dev/null) || remote_status="(SSH heartbeat failed — remote may be unreachable)"
+            printf "[%s] ${CYAN}♥ [%s] %ds${NC} %s\n" \
+                "$(date '+%H:%M:%S')" "$label" "$elapsed" "$remote_status"
+        done
+    ) &
+    REMOTE_HEARTBEAT_PID=$!
+}
+
+remote_heartbeat_stop() {
+    if [[ -n "$REMOTE_HEARTBEAT_PID" ]]; then
+        kill "$REMOTE_HEARTBEAT_PID" 2>/dev/null || true
+        wait "$REMOTE_HEARTBEAT_PID" 2>/dev/null || true
+        REMOTE_HEARTBEAT_PID=""
+    fi
+}
+
 # ─── argument parsing ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -72,8 +135,11 @@ while [[ $# -gt 0 ]]; do
         --instance-type)   INSTANCE_TYPE="$2";                    shift 2 ;;
         --nodes)           NUMBER_OF_NODES="$2";                  shift 2 ;;
         --faulty)          NUMBER_OF_FAULTY_NODES="$2";           shift 2 ;;
+        --cpu-per-pod)     CPU_PER_POD="$2";                      shift 2 ;;
+        --pod-memory-mib)  POD_MEMORY_MIB="$2";                   shift 2 ;;
         --key-name)        KEY_NAME="$2";                         shift 2 ;;
-        --on-demand)       USE_SPOT=false;                        shift   ;;
+        --on-demand)       USE_SPOT=false;                        shift   ;;  # kept for back-compat (now default)
+        --spot)            USE_SPOT=true;                         shift   ;;
         --merge)           ENHANCED_MERGE=1;                      shift   ;;
         --no-merge)        ENHANCED_MERGE=0;                      shift   ;;
         --keep-instance)   KEEP_INSTANCE=true;                    shift   ;;
@@ -90,20 +156,32 @@ if [[ -z "$NUMBER_OF_FAULTY_NODES" ]]; then
     NUMBER_OF_FAULTY_NODES=$(( (NUMBER_OF_NODES - 1) / 3 ))
 fi
 
-# ─── auto-select instance type by node count ─────────────────────────────────
-# Each node runs as a K8s pod. Rough sizing: ~0.2 vCPU (CPU_LIMIT) + ~256 MiB per node,
-# plus headroom for k3s, core server, JMeter, Docker, and OS (~4 vCPU overhead).
-# The mapping below keeps at least 2× headroom so CPU throttling and pod scheduling
-# pressure don't distort benchmark results.
-#   Formula: need (nodes × 0.2) + 4 vCPU overhead, then 2× for headroom.
-#   64 nodes: (64×0.2)+4 = 16.8 → need ≥34 vCPU → c6i.8xlarge (32 vCPU, close enough)
+# ─── auto-select instance type by total vCPU budget ──────────────────────────
+# Required host vCPU = N × CPU_PER_POD × 1.25
+#   ×1.25 headroom covers k3s / kubelet / core-server / JMeter / Docker / OS.
+# Previously we sized only by N (assuming CPU_PER_POD=0.30), which under-sized
+# the host when CPU_PER_POD was raised for larger shards — pods were starved
+# and the P2P mesh collapsed. Now the two values are coupled.
+#
+# Example targets (CPU_PER_POD=1.50 for NPS=100 shards):
+#   N=100 → 100×1.50×1.25 = 188 vCPU → c7i.48xlarge (192 vCPU)
+#   N=200 → 200×1.50×1.25 = 375 vCPU → EXCEEDS c7i.48xlarge; warn & pin to 48x
+#
+# Example targets (CPU_PER_POD=0.30 for NPS=4 shards):
+#   N=100 → 100×0.30×1.25 =  38 vCPU → c6i.4xlarge (16 → next tier c6i.8xlarge, 32) → c6i.16xlarge (64)
 if [[ -z "$INSTANCE_TYPE" ]]; then
-    if   (( NUMBER_OF_NODES <= 8   )); then INSTANCE_TYPE="c6i.xlarge"    # 4 vCPU, 8 GiB
-    elif (( NUMBER_OF_NODES <= 16  )); then INSTANCE_TYPE="c6i.2xlarge"   # 8 vCPU, 16 GiB
-    elif (( NUMBER_OF_NODES <= 32  )); then INSTANCE_TYPE="c6i.4xlarge"   # 16 vCPU, 32 GiB
-    elif (( NUMBER_OF_NODES <= 64  )); then INSTANCE_TYPE="c6i.8xlarge"   # 32 vCPU, 64 GiB
-    elif (( NUMBER_OF_NODES <= 128 )); then INSTANCE_TYPE="c6i.16xlarge"  # 64 vCPU, 128 GiB
-    else                                    INSTANCE_TYPE="c6i.32xlarge"  # 128 vCPU, 256 GiB
+    REQUIRED_VCPU=$(python3 -c "import math; print(math.ceil($NUMBER_OF_NODES * $CPU_PER_POD * 1.25))")
+    info "Sizing EC2: N=$NUMBER_OF_NODES × CPU_PER_POD=$CPU_PER_POD × 1.25 headroom = $REQUIRED_VCPU vCPU required"
+    if   (( REQUIRED_VCPU <=   8 )); then INSTANCE_TYPE="c6i.2xlarge"   # 8 vCPU,   16 GiB
+    elif (( REQUIRED_VCPU <=  16 )); then INSTANCE_TYPE="c6i.4xlarge"   # 16 vCPU,  32 GiB
+    elif (( REQUIRED_VCPU <=  32 )); then INSTANCE_TYPE="c6i.8xlarge"   # 32 vCPU,  64 GiB
+    elif (( REQUIRED_VCPU <=  64 )); then INSTANCE_TYPE="c6i.16xlarge"  # 64 vCPU, 128 GiB
+    elif (( REQUIRED_VCPU <=  96 )); then INSTANCE_TYPE="c6i.24xlarge"  # 96 vCPU, 192 GiB
+    elif (( REQUIRED_VCPU <= 128 )); then INSTANCE_TYPE="c6i.32xlarge"  # 128 vCPU, 256 GiB
+    elif (( REQUIRED_VCPU <= 192 )); then INSTANCE_TYPE="c7i.48xlarge"  # 192 vCPU, 384 GiB
+    else
+        warn "Required $REQUIRED_VCPU vCPU exceeds c7i.48xlarge (192 vCPU); pinning to c7i.48xlarge — pods will contend"
+        INSTANCE_TYPE="c7i.48xlarge"
     fi
 fi
 
@@ -127,6 +205,8 @@ ok "Prerequisites met"
 # ─── cleanup trap ─────────────────────────────────────────────────────────────
 cleanup() {
     local exit_code=$?
+    # Stop remote heartbeat first so it doesn't race the cleanup SSH calls.
+    remote_heartbeat_stop
     echo ""
     info "Running cleanup..."
 
@@ -407,8 +487,9 @@ curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
 dnf install -y -q nodejs
 
 # ── pnpm via corepack ──
+# Pin to pnpm 10.x: pnpm 11+ requires Node >= v22.13 (uses node:sqlite built-in).
 corepack enable
-corepack prepare pnpm@latest --activate
+corepack prepare pnpm@10 --activate
 
 # ── Docker ──
 systemctl enable --now docker
@@ -729,6 +810,10 @@ if [[ "$SKIP_UPLOAD" != "true" ]]; then
     info "Installing Node.js dependencies on EC2 in parallel ..."
     $SSH 'bash -s' << 'REMOTE_DEPS'
 set -euo pipefail
+# Self-heal pnpm pin per-user: corepack caches under $HOME, so root's activation
+# (from user-data) doesn't apply to ec2-user. pnpm 11.x is incompatible with
+# Node 20 (uses node:sqlite). Force-pin in ec2-user's cache here.
+corepack prepare pnpm@10 --activate >/dev/null
 pids=()
 (cd ~/blockchain/custom-consensus/pbft-enhanced   && HUSKY=0 pnpm install --frozen-lockfile) & pids+=($!)
 (cd ~/blockchain/custom-consensus/pbft-rapidchain && HUSKY=0 pnpm install --frozen-lockfile) & pids+=($!)
@@ -740,6 +825,10 @@ fi
 
 # ─── build Docker images on the remote ───────────────────────────────────────
 info "Building Docker images on EC2 in parallel (saves ~3-5 min of billable time) ..."
+# Heartbeat during docker build: the four parallel builds print interleaved
+# output but can go silent for minutes at a time on big Node.js layers. The
+# heartbeat gives an unambiguous signal that the remote is still alive.
+remote_heartbeat_start "docker-build"
 # Single-quoted heredoc delimiter suppresses local variable expansion so $! and pids
 # are evaluated by the remote shell, not the local one.
 $SSH 'bash -s' << 'REMOTE_BUILD'
@@ -763,6 +852,7 @@ sudo docker save lebaz20/blockchain-rapidchain-core-server:latest | sudo k3s ctr
 for pid in "${pids[@]}"; do wait "$pid"; done
 echo "==> Docker images built and imported into k3s"
 REMOTE_BUILD
+remote_heartbeat_stop
 ok "Docker images built"
 
 # ─── patch start.sh scripts to skip the docker build step ────────────────────
@@ -785,6 +875,8 @@ info "=========================================="
 info "Starting blockchain performance comparison"
 info "  Nodes           : $NUMBER_OF_NODES"
 info "  Faulty nodes    : $NUMBER_OF_FAULTY_NODES"
+info "  CPU/pod         : $CPU_PER_POD vCPU"
+info "  MEM/pod         : $POD_MEMORY_MIB Mi"
 info "  Instance type   : $INSTANCE_TYPE"
 info "  Region          : $AWS_REGION"
 info "=========================================="
@@ -803,6 +895,8 @@ export KUBECONFIG=/home/ec2-user/.kube/config
 export NUMBER_OF_NODES=${NUMBER_OF_NODES}
 export NUMBER_OF_FAULTY_NODES=${NUMBER_OF_FAULTY_NODES}
 export ENHANCED_MERGE=${ENHANCED_MERGE}
+export CPU_PER_POD=${CPU_PER_POD}
+export POD_MEMORY_MIB=${POD_MEMORY_MIB}
 export USE_HOST_NETWORK=true
 export PATH=\$PATH:/usr/local/bin
 cd ~/blockchain/custom-consensus
@@ -813,12 +907,18 @@ chmod +x compare-performance.sh \\
 RUNSCRIPT
 
 $SSH "chmod +x /tmp/run-test.sh"
+# Start a background heartbeat that pings the remote every REMOTE_HEARTBEAT_INTERVAL
+# seconds with a fresh SSH connection. If the main -t session ever wedges (SYN
+# rate-limiting, NAT rebinding, buffered SSH pipe), the heartbeat still surfaces
+# the remote phase / pod counts / load so we know the test is progressing.
+remote_heartbeat_start "test-run"
 # -t allocates a pty so output is line-buffered and streams live to your terminal.
 # The SSH -t session may return non-zero when the ControlMaster socket closes even
 # if the remote command succeeded. Capture the exit code explicitly so set -e
 # doesn't abort the script before the summary/cleanup phase.
 _ssh_exit=0
 $SSH -t "/tmp/run-test.sh" || _ssh_exit=$?
+remote_heartbeat_stop
 if [[ $_ssh_exit -ne 0 ]]; then
     warn "SSH session exited with code $_ssh_exit (may be benign — ControlMaster close)"
 fi

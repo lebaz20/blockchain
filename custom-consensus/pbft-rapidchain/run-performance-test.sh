@@ -21,6 +21,37 @@ log() {
     echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a server.log
 }
 
+# Phase marker: journal-comparison.sh reads $PHASE_FILE from a background
+# heartbeat loop to show "still on <phase> after Ns" every 30s. Safe no-op
+# when PHASE_FILE is unset (i.e. when running this script standalone).
+write_phase() {
+    [ -n "${PHASE_FILE:-}" ] || return 0
+    printf '%s\n' "rapidchain: $*" > "${PHASE_FILE}" 2>/dev/null || true
+}
+
+# Diagnostic snapshot on non-zero exit: dumps pod status, events, top
+# processes, and memory so the failing state is visible before cleanup wipes it.
+diag_snapshot() {
+    log "${YELLOW}════════ DIAG SNAPSHOT (rapidchain: $*) ════════${NC}"
+    log "--- phase file ---"
+    [ -n "${PHASE_FILE:-}" ] && [ -s "$PHASE_FILE" ] && cat "$PHASE_FILE" | tee -a server.log || true
+    log "--- pod status counts (blockchain domain) ---"
+    kubectl get pods -l domain=blockchain --no-headers 2>&1 | awk '{print $3}' | sort | uniq -c | tee -a server.log || true
+    log "--- non-Running pods (up to 30) ---"
+    kubectl get pods -A --no-headers 2>&1 | grep -v -E 'Running|Completed' | head -30 | tee -a server.log || true
+    log "--- kubectl events (last 20) ---"
+    kubectl get events -A --sort-by=.lastTimestamp 2>&1 | tail -20 | tee -a server.log || true
+    log "--- top 10 CPU / RSS ---"
+    ps aux --sort=-%cpu 2>/dev/null | head -6 | tee -a server.log || true
+    ps aux --sort=-rss  2>/dev/null | head -6 | tee -a server.log || true
+    log "--- memory / load ---"
+    free -h 2>/dev/null | tee -a server.log || true
+    uptime 2>/dev/null | tee -a server.log || true
+    log "--- kubectl port-forward count ---"
+    ps -ef 2>/dev/null | grep -c '[k]ubectl port-forward' | tee -a server.log || true
+    log "${YELLOW}════════ END DIAG SNAPSHOT ════════${NC}"
+}
+
 # Configuration (use defaults from start.sh if not set)
 export NUMBER_OF_NODES=${NUMBER_OF_NODES:-512}
 export TRANSACTION_THRESHOLD=${TRANSACTION_THRESHOLD:-100}
@@ -66,8 +97,16 @@ mkdir -p "${RESULTS_DIR}"
 
 # Cleanup function
 cleanup() {
+    local _exit=$?
+    write_phase "cleanup (exit=$_exit)"
+    # On non-zero exit, dump a full diag snapshot BEFORE deleting resources so
+    # the state that caused the failure is captured (kubectl delete would wipe
+    # the evidence otherwise).
+    if [ "$_exit" -ne 0 ]; then
+        diag_snapshot "cleanup exit=$_exit"
+    fi
     log "\n${YELLOW}Cleaning up...${NC}"
-    
+
     # Capture pod states BEFORE deletion for diagnostics
     log "Pod states at cleanup:"
     kubectl get pods -l domain=blockchain --no-headers 2>/dev/null | awk '{print $3}' | sort | uniq -c | tee -a server.log || true
@@ -79,12 +118,64 @@ cleanup() {
         pkill -f "kubectl port-forward" 2>&1 | tee -a server.log || true
         pkill -f "kubectl proxy" 2>&1 | tee -a server.log || true
     fi
+    # Multi-EC2 socat forwarders (safe to run unconditionally — nothing happens
+    # if no socat processes are alive)
+    pkill -f "socat TCP-LISTEN" 2>/dev/null || true
     pkill -f "kubectl logs" 2>/dev/null || true
-    
-    # Delete Kubernetes resources
+
+    # Post-hoc log dump — the live streams only cover a handful of pods (to
+    # avoid saturating the k3s master with SPDY streams). This dumps the full
+    # log of every p2p-server pod after JMeter has completed. Required to
+    # inspect the current-view proposer's state after a consensus stall — that
+    # pod is picked deterministically by block hash and is almost never in the
+    # small streamed sample.
+    #
+    # SEQUENTIAL, not parallel: previous parallel implementation (100
+    # concurrent `kubectl logs &` + wait) opened 100 SPDY connections to the
+    # k3s API server simultaneously, saturating the c6i.large master and
+    # blocking all subsequent SSH access for the whole cleanup window. Serial
+    # dumps take ~30 s but never spike the control plane.
+    log "Dumping per-pod logs (post-hoc, sequential)..."
+    mkdir -p pod-logs 2>/dev/null || true
+    _POD_LIST=$(kubectl get pods -l domain=blockchain --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null)
+    _DUMP_START=$SECONDS
+    for _POD in $_POD_LIST; do
+        kubectl logs "$_POD" > "pod-logs/${_POD}.log" 2>/dev/null || true
+    done
+    _DUMP_TOOK=$((SECONDS - _DUMP_START))
+    log "  ✓ pod-logs/ populated: $(ls pod-logs/ 2>/dev/null | wc -l) files in ${_DUMP_TOOK}s"
+
+    # Delete Kubernetes resources.
+    # --grace-period=0 --force is the "hard kill" combo. Passing --grace-period=1
+    # with --force is rejected by kubectl ("--force and --grace-period greater
+    # than 0 cannot be specified together") — silent failures here left 100+
+    # pods Running after every 100-node test, which pinned the c6i.large master
+    # while the outer teardown tried to terminate agents (see start.sh line 63,
+    # which uses the correct flags).
     log "Deleting Kubernetes resources..."
-    kubectl delete -f kubeConfig.yml --ignore-not-found --grace-period=1 --force 2>&1 | tee -a server.log || true
-    
+    _DELETE_OUT=$(kubectl delete -f kubeConfig.yml --ignore-not-found --grace-period=0 --force 2>&1)
+    _DELETE_RC=$?
+    echo "$_DELETE_OUT" | tee -a server.log
+    if [ "$_DELETE_RC" -ne 0 ]; then
+        log "${RED}kubectl delete failed (rc=$_DELETE_RC) — pods likely still running${NC}"
+    fi
+
+    # Verify pods are actually gone before returning. If they aren't, the outer
+    # driver's `aws ec2 delete-fleets --terminate-instances` will race against
+    # a still-active PBFT gossip storm and freeze the master's kube-apiserver.
+    log "Waiting for pods to fully terminate..."
+    if kubectl wait --for=delete pods -l domain=blockchain --timeout=60s 2>&1 | tee -a server.log; then
+        log "${GREEN}✓ All blockchain pods removed${NC}"
+    else
+        _STUCK=$(kubectl get pods -l domain=blockchain --no-headers 2>/dev/null | wc -l | tr -d ' ')
+        log "${RED}⚠ ${_STUCK} pods still present after 60s — forcing kubelet-side termination${NC}"
+        # Nuclear option: pull the pod objects out of etcd without waiting for
+        # container runtime confirmation. Agents may already be terminating.
+        kubectl get pods -l domain=blockchain -o name 2>/dev/null \
+            | xargs -r -n 20 -P 4 kubectl delete --grace-period=0 --force --wait=false 2>&1 \
+            | tee -a server.log || true
+    fi
+
     log "${GREEN}Cleanup complete${NC}"
 }
 
@@ -92,6 +183,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Step 1: Start blockchain using existing start.sh
+write_phase "step1: start.sh (kubectl apply)"
 log "${BLUE}Step 1: Starting blockchain (using start.sh)...${NC}"
 # Run start.sh to completion so kubectl apply finishes all resources.
 # Previously ran in background and killed early when port 3001 responded,
@@ -114,6 +206,7 @@ echo
 # Memory raised to 256Mi so pods no longer crash under the P2P connection storm.
 # Readiness probes are lenient (10s period, 5s timeout, 6 failures) to tolerate
 # busy startup without false negatives.
+write_phase "step2: waiting for pod readiness"
 log "${BLUE}Step 2: Waiting for all nodes to be ready...${NC}"
 TOTAL_EXPECTED=$((NUMBER_OF_NODES))  # p2p-server pods only (core-server has no probe)
 TIMEOUT=$((NUMBER_OF_NODES * 3))
@@ -147,6 +240,37 @@ while true; do
 done
 echo
 
+# ── Multi-EC2 socat forwarders ──────────────────────────────────────────────
+# When pods use hostNetwork AND are spread 1-per-node (multi-EC2 cluster mode),
+# each pod lives on a different agent's private IP. `localhost:PORT` on the
+# master doesn't reach them, so JMeter and stats collection would fail.
+# Spawn one socat TCP-relay per pod, so master's localhost:PORT → agent-IP:PORT.
+# Cheap kernel-level TCP splice — negligible CPU vs kubectl port-forward.
+if [ "${USE_HOST_NETWORK:-}" = "true" ] && [ "${SPREAD_PODS_ACROSS_NODES:-}" = "true" ]; then
+    write_phase "step2c: socat forwarders (multi-EC2)"
+    log "${BLUE}Setting up socat forwarders (multi-EC2 hostNetwork bridge)...${NC}"
+    if ! command -v socat &>/dev/null; then
+        sudo dnf install -y -q socat 2>&1 | tail -1 || true
+    fi
+    pkill -f "socat TCP-LISTEN" 2>/dev/null || true
+    sleep 1
+    _SOCAT_STARTED=0
+    for ((i=0; i<NUMBER_OF_NODES; i++)); do
+        POD=p2p-server-$i
+        PORT=$((3001+i))
+        AGENT_IP=$(kubectl get pod "$POD" -o jsonpath='{.status.hostIP}' 2>/dev/null)
+        if [ -n "$AGENT_IP" ]; then
+            nohup socat TCP-LISTEN:$PORT,fork,reuseaddr TCP:$AGENT_IP:$PORT >/dev/null 2>&1 &
+            _SOCAT_STARTED=$((_SOCAT_STARTED + 1))
+        fi
+        # small batch pause every 25 to avoid TCP bind burst
+        if (( (i+1) % 25 == 0 )); then sleep 1; fi
+    done
+    sleep 3   # give socat processes a moment to bind ports
+    _SOCAT_LIVE=$(pgrep -c -f "socat TCP-LISTEN" || echo 0)
+    log "  ${GREEN}✓ ${_SOCAT_LIVE}/${_SOCAT_STARTED} socat forwarders active${NC}"
+fi
+
 # Step 2b: Wait for P2P mesh to stabilize before JMeter starts.
 # Readiness probes only verify the HTTP endpoint is up — they don't check peer
 # connectivity. At 512 nodes, ~1536 WebSocket connections fire simultaneously;
@@ -163,20 +287,37 @@ if [ "${NUMBER_OF_NODES}" -gt 32 ]; then
     # Require at least 80% of expected healthy shards to be reporting UNDER-UTILIZED
     MIN_HEALTHY=$(( EXPECTED_HEALTHY * 80 / 100 ))
     [ "$MIN_HEALTHY" -lt 1 ] && MIN_HEALTHY=1
+    write_phase "step2b: P2P mesh stabilize (need $MIN_HEALTHY/$EXPECTED_HEALTHY healthy shards)"
     log "${BLUE}Step 2b: Waiting for P2P mesh to stabilize ($MIN_HEALTHY/$EXPECTED_HEALTHY healthy shards needed)...${NC}"
-    STABILIZE_TIMEOUT=300
+    # Large shards (NPS>20) need higher MIN_APPROVALS quorums to form; each pod
+    # can't report non-FAULTY until it sees floor(2·(NPS-1)/3)+1 peers, and the
+    # startup batching in start.sh means the mesh takes longer to converge.
+    if [ "${NUMBER_OF_NODES_PER_SHARD}" -gt 20 ]; then
+        STABILIZE_TIMEOUT=600
+    else
+        STABILIZE_TIMEOUT=300
+    fi
     STABILIZE_ELAPSED=0
     while [ $STABILIZE_ELAPSED -lt $STABILIZE_TIMEOUT ]; do
-        # Sample every Nth node (N = nodes_per_shard) and count distinct
-        # non-FAULTY shard indices. Nodes are shuffled across shards so any
-        # sampling stride covers different shards.
+        # Sample at least min(20, NUMBER_OF_NODES) evenly-spaced nodes and count
+        # distinct non-FAULTY shard indices. Previously we sampled every
+        # NUMBER_OF_NODES_PER_SHARD-th node — at NPS==NUMBER_OF_NODES that meant
+        # one sample, so a single non-responsive pod hid the whole shard's
+        # health. Sampling ≥20 pods gives redundancy even when NPS is large.
+        SAMPLE_COUNT=$(( NUMBER_OF_NODES < 20 ? NUMBER_OF_NODES : 20 ))
+        SAMPLE_STRIDE=$(( NUMBER_OF_NODES / SAMPLE_COUNT ))
+        [ $SAMPLE_STRIDE -lt 1 ] && SAMPLE_STRIDE=1
         HEALTHY_COUNT=$(
-            for ((i=0; i<NUMBER_OF_NODES; i+=NUMBER_OF_NODES_PER_SHARD)); do
+            for ((i=0; i<NUMBER_OF_NODES; i+=SAMPLE_STRIDE)); do
                 PORT=$((3001 + i))
-                curl -s --max-time 2 http://localhost:$PORT/stats 2>/dev/null || true
+                curl -s --max-time 10 http://localhost:$PORT/stats 2>/dev/null || true
                 echo  # newline delimiter so Python parses each response as a separate line
             done | python3 -c "
 import sys, json
+# Only NORMAL / UNDER-UTILIZED / OVER-UTILIZED count as ready — WARMING means
+# below quorum with no committed block yet (startup, not steady state), FAULTY
+# means below quorum after previously committing.
+READY = {'NORMAL', 'UNDER-UTILIZED', 'OVER-UTILIZED'}
 healthy = set()
 for line in sys.stdin:
     line = line.strip()
@@ -185,7 +326,7 @@ for line in sys.stdin:
         d = json.loads(line)
         shard = d.get('rate',{}).get('shardIndex','')
         status = d.get('rate',{}).get('shardStatus','FAULTY')
-        if status != 'FAULTY' and shard:
+        if status in READY and shard:
             healthy.add(shard)
     except: pass
 print(len(healthy))" 2>/dev/null || echo 0
@@ -209,6 +350,7 @@ fi
 if [ "${USE_HOST_NETWORK:-}" = "true" ]; then
     log "Skipping port-forwards (hostNetwork mode — pods bind directly to host ports)"
 else
+    write_phase "setup: kubectl port-forward for $NUMBER_OF_NODES nodes"
     log "Setting up port-forwards for JMeter..."
     # Raise file-descriptor and inotify limits
     ulimit -n 65536 2>/dev/null || true
@@ -265,7 +407,13 @@ for subset, nodes in by_shard.items():
         dead_pod_indices = pod_indices
     if healthy_pod_indices and dead_pod_indices:
         break
-all_indices = healthy_pod_indices + dead_pod_indices
+# Cap the number of streamed pods. At NPS >= 100, streaming logs from every
+# healthy shard pod triggered N concurrent `kubectl logs -f` SPDY connections
+# to the k3s API server, which saturated the master (SSH banner exchange
+# timed out for the full duration of the run). Three pods per role gives
+# enough signal for diagnostics without overwhelming the control plane.
+_MAX_PER_ROLE = 3
+all_indices = healthy_pod_indices[:_MAX_PER_ROLE] + dead_pod_indices[:_MAX_PER_ROLE]
 print(" ".join(f"p2p-server-{i}" for i in all_indices))
 PYEOF
 )
@@ -278,6 +426,7 @@ PYEOF
     fi
 fi
 
+write_phase "step3: JMeter (threads=${JMETER_THREADS}, dur=${JMETER_DURATION}s)"
 log "${BLUE}Step 3: Running JMeter performance test...${NC}"
 log "  Duration: ${JMETER_DURATION}s (active load: $((JMETER_DURATION - JMETER_RAMP_DOWN))s + ramp-down: ${JMETER_RAMP_DOWN}s)"
 log "  Threads: ${JMETER_THREADS}"
@@ -342,6 +491,7 @@ if [ "${USE_HOST_NETWORK:-}" != "true" ]; then
 fi
 
 # Wait for transaction pool to drain (wait until unassigned hits 0)
+write_phase "drain: waiting for TX pool to drain"
 log "${BLUE}Waiting for transaction pool to drain...${NC}"
 DRAIN_TIMEOUT=60
 DRAIN_ELAPSED=0
@@ -363,7 +513,7 @@ while [ $DRAIN_ELAPSED -lt $DRAIN_TIMEOUT ]; do
     while [ $(( OFFSET * STEP )) -lt $NUMBER_OF_NODES ]; do
         IDX=$(( OFFSET * STEP ))
         PORT=$((3001+IDX))
-        DRAIN_STATS=$(curl -s --max-time 1 http://localhost:$PORT/stats 2>/dev/null || echo '')
+        DRAIN_STATS=$(curl -s --max-time 5 http://localhost:$PORT/stats 2>/dev/null || echo '')
         if [ -n "$DRAIN_STATS" ]; then
             NODE_UNASSIGNED=$(echo "$DRAIN_STATS" | python3 -c "
 import sys, json
@@ -416,6 +566,7 @@ DRAIN_END_TIME=${DRAIN_END_TIME:-$(date +%s)}
 TOTAL_ELAPSED=$(( DRAIN_END_TIME - TEST_START_TIME ))
 
 # Step 4: Collect blockchain statistics
+write_phase "step4: collecting blockchain stats"
 log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
 {
     echo "PBFT-RapidChain Performance Test Results"
@@ -461,7 +612,7 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
     trap "rm -rf $STATS_TMP" RETURN 2>/dev/null || true
     for ((i=0; i<NUMBER_OF_NODES; i++)); do
         PORT=$((3001+i))
-        curl -s --max-time 2 "http://localhost:$PORT/stats" > "$STATS_TMP/$i.json" 2>/dev/null &
+        curl -s --max-time 10 "http://localhost:$PORT/stats" > "$STATS_TMP/$i.json" 2>/dev/null &
     done
     wait
 
@@ -554,6 +705,7 @@ log "${GREEN}✓ Statistics collected${NC}"
 echo
 
 # Step 5: Parse JMeter results
+write_phase "step5: parsing JMeter results"
 log "${BLUE}Step 5: Parsing JMeter results...${NC}"
 if [ -f "${RESULTS_FILE}" ]; then
     {

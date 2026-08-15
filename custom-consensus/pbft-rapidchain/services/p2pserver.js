@@ -67,6 +67,13 @@ class P2pserver {
     // Vote pools for atomic view-change: targetView → Set<publicKey>.
     this._viewChangeVotes = new Map()
     this._committeeViewChangeVotes = new Map()
+    // Silent-proposer detection timers. Regular and committee flows MUST have
+    // separate timers — before this split, both flows shared a single
+    // `_blockCreationTimeout`, so committee's clear/reschedule could
+    // silently wipe the regular flow's countdown (and vice versa) at 100+
+    // nodes where both flows are active simultaneously.
+    this._blockCreationTimeout = null
+    this._committeeBlockCreationTimeout = null
   }
 
   listen() {
@@ -77,9 +84,45 @@ class P2pserver {
       const isFaulty = parsedUrl.searchParams.get('isFaulty')
       const isCommittee = parsedUrl.searchParams.get('isCommittee')
       const isCommitteeFlag = isCommittee === 'true'
+      const openedAt = Date.now()
       logger.log(`new connection from ${port} to ${P2P_PORT}`)
+      logger.log(
+        `[WS-IN] OPEN peer=${port} committee=${isCommitteeFlag} peers=${
+          Object.keys(this.sockets.peers).length
+        } committeePeers=${Object.keys(this.sockets.committeePeers).length}`
+      )
       this.connectSocket(socket, port, isFaulty === 'true', false, isCommitteeFlag)
       this.messageHandler(socket, false, isCommitteeFlag)
+      socket.on('error', (error) => {
+        logger.log(
+          `[WS-IN] ERROR peer=${port} code=${error && error.code} msg=${
+            error && error.message
+          }`
+        )
+      })
+      // Clean up stale entry when the remote peer drops so gossip messages
+      // aren't sent to dead sockets. Without this, sockets.peers accumulates
+      // entries pointing at closed sockets → EPIPE on every send + inflated
+      // nonFaultyNodesCount. Matches pbft-enhanced's inbound close handling
+      // so transport plumbing is symmetric between the two systems.
+      socket.on('close', (code, reason) => {
+        const key = isCommitteeFlag ? 'committeePeers' : 'peers'
+        logger.warn(`Incoming peer ${port} disconnected from ${P2P_PORT}`)
+        logger.log(
+          `[WS-IN] CLOSE peer=${port} committee=${isCommitteeFlag} lived=${
+            Date.now() - openedAt
+          }ms code=${code} reason=${reason && reason.toString()} peers=${
+            Object.keys(this.sockets.peers).length
+          } committeePeers=${Object.keys(this.sockets.committeePeers).length}`
+        )
+        if (this.sockets[key][port]?.socket === socket) {
+          delete this.sockets[key][port]
+          this.idaGossip.setPeerSockets({
+            peers: this.sockets.peers,
+            committeePeers: this.sockets.committeePeers
+          })
+        }
+      })
     })
     this.connectToPeers()
     this.connectToCore(false)
@@ -102,6 +145,22 @@ class P2pserver {
       const total = this.blockchain.getTotal()
       this.broadcastRateToCore(rate, total)
     }, TIMEOUTS.RATE_BROADCAST_INTERVAL_MS)
+
+    // Diagnostic-only: every 10s, print a compact snapshot of mesh state so we
+    // can see whether peers accumulate then collapse, or never accumulate at
+    // all. Grep the pod log for `[MESH]` to trace convergence over time.
+    setInterval(() => {
+      const mem = process.memoryUsage()
+      logger.log(
+        `[MESH] port=${P2P_PORT} peers=${
+          Object.keys(this.sockets.peers).length
+        } committeePeers=${Object.keys(this.sockets.committeePeers).length} core=${
+          this.coreSocket.core ? 1 : 0
+        } committeeCore=${this.coreSocket.committeeCore ? 1 : 0} rss=${Math.round(
+          mem.rss / 1024 / 1024
+        )}MB heap=${Math.round(mem.heapUsed / 1024 / 1024)}MB`
+      )
+    }, 10000)
   }
 
   // eslint-disable-next-line max-params
@@ -136,16 +195,31 @@ class P2pserver {
   }
 
   waitForWebServer(url, retryInterval = 1000) {
+    const startedAt = Date.now()
+    let attempts = 0
     return new Promise((resolve) => {
       function checkWebServer() {
+        attempts++
         axios
           .get(`${url}/health`)
           .then(() => {
             logger.log(`WebServer is open: ${url}`)
+            logger.log(
+              `[HEALTH] READY url=${url} attempts=${attempts} elapsed=${
+                Date.now() - startedAt
+              }ms`
+            )
             resolve(true)
             return true
           })
-          .catch(() => {
+          .catch((err) => {
+            if (attempts === 1 || attempts % 15 === 0) {
+              logger.log(
+                `[HEALTH] RETRY url=${url} attempt=${attempts} elapsed=${
+                  Date.now() - startedAt
+                }ms code=${err && err.code}`
+              )
+            }
             setTimeout(checkWebServer, retryInterval + TIMEOUTS.HEALTH_CHECK_RETRY_MS)
           })
       }
@@ -156,50 +230,148 @@ class P2pserver {
 
   // connects to the peers passed in command line
   async connectToPeers() {
+    const healthStart = Date.now()
+    logger.log(`[HEALTH] START waiting for ${PEERS.length} peer health checks`)
     await Promise.all(
       PEERS.map((peer) => this.waitForWebServer(peer.replace('ws', 'http').replace(':5', ':3')))
     )
+    logger.log(
+      `[HEALTH] ALL-READY peers=${PEERS.length} totalElapsed=${
+        Date.now() - healthStart
+      }ms`
+    )
+    // Startup jitter: instead of firing all N-1 outbound WebSocket handshakes
+    // synchronously, spread each pod's initial connect burst across
+    // STARTUP_JITTER_MS. Prevents the Node.js event loop from saturating on
+    // 99 concurrent WS upgrades at NPS=100 (which produced shardSize:3 with
+    // ~44/100 pods responding to HTTP). Applied identically in pbft-enhanced.
+    const STARTUP_JITTER_MS = Number(process.env.STARTUP_JITTER_MS || 15000)
     PEERS.forEach((peer) => {
+      const peerPort = peer.split(':')[2]
       const connectPeer = () => {
+        const scheduledAt = Date.now()
         const socket = new WebSocket(
           `${peer}?port=${P2P_PORT}&isFaulty=${IS_FAULTY ? 'true' : 'false'}&subsetIndex=${SUBSET_INDEX}&httpPort=${process.env.HTTP_PORT}`
         )
-        socket.on('error', (error) => {
-          logger.error(`Failed to connect to peer. Retrying in 5s...`, error)
+        let openedAt = 0
+        // reconnectScheduled prevents duplicate reconnect chains when both
+        // error and close fire on the same dead socket.
+        let reconnectScheduled = false
+        const scheduleReconnect = () => {
+          if (reconnectScheduled) return
+          reconnectScheduled = true
           setTimeout(connectPeer, TIMEOUTS.PEER_RECONNECT_DELAY_MS)
+        }
+        socket.on('error', (error) => {
+          logger.error(`Failed to connect to peer ${peerPort}. Retrying in 5s...`, error)
+          logger.log(
+            `[WS-OUT] ERROR peer=${peerPort} code=${error && error.code} msg=${
+              error && error.message
+            } sinceScheduled=${Date.now() - scheduledAt}ms opened=${openedAt > 0}`
+          )
+          scheduleReconnect()
+        })
+        socket.on('close', (code, reason) => {
+          logger.warn(`Peer ${peerPort} disconnected from ${P2P_PORT}, reconnecting in 5s...`)
+          logger.log(
+            `[WS-OUT] CLOSE peer=${peerPort} lived=${
+              openedAt > 0 ? Date.now() - openedAt : -1
+            }ms sinceScheduled=${Date.now() - scheduledAt}ms code=${code} reason=${
+              reason && reason.toString()
+            } peers=${Object.keys(this.sockets.peers).length}`
+          )
+          delete this.sockets.peers[peerPort]
+          this.idaGossip.setPeerSockets({
+            peers: this.sockets.peers,
+            committeePeers: this.sockets.committeePeers
+          })
+          scheduleReconnect()
         })
         socket.on('open', () => {
-          logger.log(`new connection from inside ${P2P_PORT} to ${peer.split(':')[2]}`)
-          this.connectSocket(socket, peer.split(':')[2], false, false, false)
+          openedAt = Date.now()
+          logger.log(`new connection from inside ${P2P_PORT} to ${peerPort}`)
+          logger.log(
+            `[WS-OUT] OPEN peer=${peerPort} connectMs=${openedAt - scheduledAt} peers=${
+              Object.keys(this.sockets.peers).length + 1
+            }`
+          )
+          this.connectSocket(socket, peerPort, false, false, false)
           this.messageHandler(socket, false, false)
         })
       }
-      connectPeer()
+      // Initial jitter only — reconnects use fixed PEER_RECONNECT_DELAY_MS.
+      setTimeout(connectPeer, Math.floor(Math.random() * STARTUP_JITTER_MS))
     })
   }
 
   async connectToCommitteePeers() {
+    const healthStart = Date.now()
+    logger.log(`[HEALTH] START waiting for ${COMMITTEE_PEERS.length} committee health checks`)
     await Promise.all(
       COMMITTEE_PEERS.map((committeePeer) =>
         this.waitForWebServer(committeePeer.replace('ws', 'http').replace(':5', ':3'))
       )
     )
+    logger.log(
+      `[HEALTH] ALL-READY committeePeers=${COMMITTEE_PEERS.length} totalElapsed=${
+        Date.now() - healthStart
+      }ms`
+    )
+    // Same jitter + close-cleanup pattern as connectToPeers, applied to the
+    // committee mesh (which is smaller but still bursty at startup).
+    const STARTUP_JITTER_MS = Number(process.env.STARTUP_JITTER_MS || 15000)
     COMMITTEE_PEERS.forEach((committeePeer) => {
+      const committeePeerPort = committeePeer.split(':')[2]
       const connectCommitteePeer = () => {
+        const scheduledAt = Date.now()
         const socket = new WebSocket(
           `${committeePeer}?port=${P2P_PORT}&isFaulty=${IS_FAULTY ? 'true' : 'false'}&isCommittee=true&subsetIndex=${SUBSET_INDEX}&httpPort=${process.env.HTTP_PORT}`
         )
-        socket.on('error', (error) => {
-          logger.error(`Failed to connect to committee peer. Retrying in 5s...`, error)
+        let openedAt = 0
+        let reconnectScheduled = false
+        const scheduleReconnect = () => {
+          if (reconnectScheduled) return
+          reconnectScheduled = true
           setTimeout(connectCommitteePeer, TIMEOUTS.PEER_RECONNECT_DELAY_MS)
+        }
+        socket.on('error', (error) => {
+          logger.error(`Failed to connect to committee peer ${committeePeerPort}. Retrying in 5s...`, error)
+          logger.log(
+            `[WS-OUT-C] ERROR peer=${committeePeerPort} code=${error && error.code} msg=${
+              error && error.message
+            } sinceScheduled=${Date.now() - scheduledAt}ms opened=${openedAt > 0}`
+          )
+          scheduleReconnect()
+        })
+        socket.on('close', (code, reason) => {
+          logger.warn(`Committee peer ${committeePeerPort} disconnected from ${P2P_PORT}, reconnecting in 5s...`)
+          logger.log(
+            `[WS-OUT-C] CLOSE peer=${committeePeerPort} lived=${
+              openedAt > 0 ? Date.now() - openedAt : -1
+            }ms sinceScheduled=${Date.now() - scheduledAt}ms code=${code} reason=${
+              reason && reason.toString()
+            } committeePeers=${Object.keys(this.sockets.committeePeers).length}`
+          )
+          delete this.sockets.committeePeers[committeePeerPort]
+          this.idaGossip.setPeerSockets({
+            peers: this.sockets.peers,
+            committeePeers: this.sockets.committeePeers
+          })
+          scheduleReconnect()
         })
         socket.on('open', () => {
-          logger.log(`new connection from inside ${P2P_PORT} to ${committeePeer.split(':')[2]}`)
-          this.connectSocket(socket, committeePeer.split(':')[2], false, false, true)
+          openedAt = Date.now()
+          logger.log(`new connection from inside ${P2P_PORT} to ${committeePeerPort}`)
+          logger.log(
+            `[WS-OUT-C] OPEN peer=${committeePeerPort} connectMs=${openedAt - scheduledAt} committeePeers=${
+              Object.keys(this.sockets.committeePeers).length + 1
+            }`
+          )
+          this.connectSocket(socket, committeePeerPort, false, false, true)
           this.messageHandler(socket, false, true)
         })
       }
-      connectCommitteePeer()
+      setTimeout(connectCommitteePeer, Math.floor(Math.random() * STARTUP_JITTER_MS))
     })
   }
 
@@ -208,9 +380,32 @@ class P2pserver {
       const socket = new WebSocket(
         `${CORE}?port=${P2P_PORT}&isCommittee=${isCommittee ? 'true' : 'false'}&subsetIndex=${SUBSET_INDEX}&httpPort=${process.env.HTTP_PORT}`
       )
-      socket.on('error', (error) => {
-        logger.error(`Failed to connect to core. Retrying in 5s...`, error)
+      // Reconnect-dedup + close cleanup for the core socket. On close, null out
+      // the correct coreSocket field (core vs committeeCore) so ida-gossip stops
+      // sending to a dead socket. No jitter here — there's only one core socket
+      // per pod, so no burst.
+      let reconnectScheduled = false
+      const scheduleReconnect = () => {
+        if (reconnectScheduled) return
+        reconnectScheduled = true
         setTimeout(connectCore, TIMEOUTS.PEER_RECONNECT_DELAY_MS)
+      }
+      socket.on('error', (error) => {
+        logger.error(`Failed to connect to core (isCommittee=${isCommittee}). Retrying in 5s...`, error)
+        scheduleReconnect()
+      })
+      socket.on('close', () => {
+        logger.warn(`Core disconnected from ${P2P_PORT} (isCommittee=${isCommittee}), reconnecting in 5s...`)
+        if (isCommittee) {
+          this.coreSocket.committeeCore = null
+        } else {
+          this.coreSocket.core = null
+        }
+        this.idaGossip.setCoreSocket({
+          core: this.coreSocket.core,
+          committeeCore: this.coreSocket.committeeCore
+        })
+        scheduleReconnect()
       })
       socket.on('open', () => {
         logger.log(`new connection from inside ${P2P_PORT} to ${CORE.split(':')[2]}`)
@@ -373,16 +568,25 @@ class P2pserver {
     // Don't reset the timer when the pool is already full — it is being used to
     // detect a silent/faulty proposer. Resetting it on every incoming transaction
     // would prevent it from ever firing under sustained load.
+    const timerKey = isCommittee ? '_committeeBlockCreationTimeout' : '_blockCreationTimeout'
     const poolFull = this.transactionPool.poolFull(isCommittee)
     if (!poolFull) {
-      clearTimeout(this._blockCreationTimeout)
-    } else if (this._blockCreationTimeout) {
+      clearTimeout(this[timerKey])
+      logger.log(
+        P2P_PORT,
+        `[VC-TIMER-CLEAR] reason=pool-not-full isCommittee=${isCommittee} shard=${SUBSET_INDEX}`
+      )
+    } else if (this[timerKey]) {
       return // already counting down — keep the existing deadline
     }
-    this._blockCreationTimeout = setTimeout(() => {
+    logger.log(
+      P2P_PORT,
+      `[VC-TIMER-ARM] isCommittee=${isCommittee} shard=${SUBSET_INDEX} poolFull=${poolFull} deadlineMs=${TIMEOUTS.BLOCK_CREATION_TIMEOUT_MS}`
+    )
+    this[timerKey] = setTimeout(() => {
       // Null the reference immediately so _scheduleTimeoutBlockCreation called from
       // within this callback knows no countdown is active and can schedule a new one.
-      this._blockCreationTimeout = null
+      this[timerKey] = null
       const now = new Date()
       const lastTransactionTime = isCommittee
         ? this.lastCommitteeTransactionCreatedAt
@@ -397,6 +601,14 @@ class P2pserver {
       const isInactive =
         lastTransactionTime &&
         now - lastTransactionTime >= TIMEOUTS.TRANSACTION_INACTIVITY_THRESHOLD_MS
+
+      logger.log(
+        P2P_PORT,
+        `[VC-TIMER-FIRE] isCommittee=${isCommittee} shard=${SUBSET_INDEX}` +
+          ` unassigned=${unassignedCount} isProposer=${isProposer}` +
+          ` isInactive=${isInactive} viewOffset=${currentViewOffset}` +
+          ` proposerIndex=${proposerObject.proposerIndex}`
+      )
 
       // ============================================================================
       // TRANSACTION REDISTRIBUTION MECHANISM (TIMEOUT-BASED WORKAROUND)
@@ -471,6 +683,11 @@ class P2pserver {
       // Vote via broadcast so all shard nodes rotate atomically.
       // Map-level dedup prevents re-broadcasting a vote already cast this epoch.
       if (unassignedCount >= TRANSACTION_THRESHOLD) {
+        logger.log(
+          P2P_PORT,
+          `[VC-CB-DECISION] branch=pool-full-vote isProposer=${isProposer}` +
+            ` shard=${SUBSET_INDEX} isCommittee=${isCommittee}`
+        )
         if (!isProposer) {
           // Only non-proposers vote — the proposer should be creating blocks,
           // not voting to skip itself.
@@ -489,6 +706,11 @@ class P2pserver {
               P2P_PORT,
               { targetView, publicKey: this.wallet.getPublicKey() },
               isCommittee
+            )
+          } else {
+            logger.log(
+              P2P_PORT,
+              `[VC-CB-DECISION] branch=pool-full-vote-DEDUP-SKIPPED targetView=${targetView}`
             )
           }
         }
@@ -639,8 +861,13 @@ class P2pserver {
     if (canCreateBlock) {
       logger.log(P2P_PORT, 'PROPOSING BLOCK')
       // We are the proposer — clear any pending view-change countdown
-      clearTimeout(this._blockCreationTimeout)
-      this._blockCreationTimeout = null
+      const _timerKey = isCommittee ? '_committeeBlockCreationTimeout' : '_blockCreationTimeout'
+      clearTimeout(this[_timerKey])
+      this[_timerKey] = null
+      logger.log(
+        P2P_PORT,
+        `[VC-TIMER-CLEAR] reason=we-are-proposer isCommittee=${isCommittee}`
+      )
       this._createAndBroadcastBlock(port, isCommittee, viewOffset)
     } else {
       const unassignedCount = isCommittee
@@ -650,6 +877,14 @@ class P2pserver {
         P2P_PORT,
         'NOT PROPOSER, waiting for proposer or view change. TOTAL UNASSIGNED:',
         unassignedCount
+      )
+      logger.log(
+        P2P_PORT,
+        `[VC-VOTE-CHECK] triggeredByTx=${_triggeredByTransaction}` +
+          ` poolFullFlag=${this[isCommittee ? '_committeePoolWasFullThisEpoch' : '_poolWasFullThisEpoch']}` +
+          ` rotatedFlag=${this[isCommittee ? '_committeeInactivityViewRotated' : '_inactivityViewRotated']}` +
+          ` viewOffset=${viewOffset} proposerIdx=${proposerObject.proposerIndex}` +
+          ` isCommittee=${isCommittee}`
       )
       // Pool is full on a real incoming transaction and the elected proposer is not
       // us — likely faulty/silent. Broadcast a vote immediately.
@@ -748,8 +983,13 @@ class P2pserver {
     if (isCommittee && viewOffset > this._committeeViewOffset)
       this._committeeViewOffset = viewOffset
     // Proposer is working — cancel the view-change countdown
-    clearTimeout(this._blockCreationTimeout)
-    this._blockCreationTimeout = null
+    const _timerKey = isCommittee ? '_committeeBlockCreationTimeout' : '_blockCreationTimeout'
+    clearTimeout(this[_timerKey])
+    this[_timerKey] = null
+    logger.log(
+      P2P_PORT,
+      `[VC-TIMER-CLEAR] reason=received-pre-prepare isCommittee=${isCommittee}`
+    )
     if (
       !this.blockPool.existingBlock(block, isCommittee) &&
       this.blockchain.isValidBlock(block, blocksCount, previousBlock, isCommittee, viewOffset)
@@ -810,8 +1050,15 @@ class P2pserver {
 
         if (result !== false) {
           // Block committed — cancel view-change countdown and reset offset for next round
-          clearTimeout(this._blockCreationTimeout)
-          this._blockCreationTimeout = null
+          const _timerKey = isCommittee
+            ? '_committeeBlockCreationTimeout'
+            : '_blockCreationTimeout'
+          clearTimeout(this[_timerKey])
+          this[_timerKey] = null
+          logger.log(
+            P2P_PORT,
+            `[VC-TIMER-CLEAR] reason=block-committed isCommittee=${isCommittee}`
+          )
           if (isCommittee) {
             this._committeeViewOffset = 0
             this._committeeInactivityViewRotated = false

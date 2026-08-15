@@ -3,7 +3,23 @@
 # nuke-aws.sh — Terminate ALL AWS resources that could incur cost.
 # Covers: EC2 instances, EBS volumes, Elastic IPs, security groups,
 #         key pairs, ECS, EKS, Lambda, NAT gateways, load balancers,
-#         S3 buckets, RDS, ElastiCache, and more.
+#         S3 buckets, RDS, ElastiCache, Launch Templates, EC2 Fleets,
+#         Spot Instance/Fleet Requests, AMIs, EBS snapshots, placement
+#         groups, non-default VPCs, IAM roles, CloudWatch log groups.
+#
+# Safety-filtered resource types (only delete when name matches
+# ^(blockchain|k3s|custom-consensus)) — so it's safe to run in an
+# account that also hosts unrelated work:
+#   - AMIs, EBS snapshots
+#   - CloudWatch log groups
+#   - IAM roles / instance profiles
+#   - Non-default VPCs
+#
+# Unfiltered (deletes everything found):
+#   EC2 instances, EBS volumes (unattached), Elastic IPs, NAT gateways,
+#   Load balancers, RDS, ElastiCache, EKS, Lambda, ECS, Security Groups
+#   (non-default), blockchain-* key pairs, Launch Templates, EC2 Fleets,
+#   Spot requests, Placement Groups, S3 buckets.
 #
 # Usage:  bash nuke-aws.sh
 #
@@ -49,6 +65,65 @@ nuke_log() {
 
 nuke_region() {
   local region="$1"
+
+  # ══════════════════════════════════════════════════════════════════
+  # STEP 0: Cancel anything that could re-launch instances after we
+  # terminate them (Spot requests + EC2 Fleets). Order matters: this
+  # MUST come before the EC2 instance termination or the Spot/Fleet
+  # controller will just spin up replacements while we're deleting.
+  # ══════════════════════════════════════════════════════════════════
+
+  # ── Spot Instance Requests (persistent auto-relaunch risk) ─────
+  local sirs
+  sirs=$(aws ec2 describe-spot-instance-requests \
+    --region "$region" \
+    --filters "Name=state,Values=open,active" \
+    --query 'SpotInstanceRequests[].SpotInstanceRequestId' \
+    --output text 2>/dev/null) || true
+
+  if [[ -n "$sirs" && "$sirs" != "None" ]]; then
+    for sir in $sirs; do
+      nuke_log "Spot Instance Req" "$region" "$sir"
+      aws ec2 cancel-spot-instance-requests --spot-instance-request-ids "$sir" \
+        --region "$region" 2>/dev/null || true
+    done
+  fi
+
+  # ── Spot Fleet Requests (older Fleet API, still auto-relaunches) ─
+  local sfrs
+  sfrs=$(aws ec2 describe-spot-fleet-requests \
+    --region "$region" \
+    --query 'SpotFleetRequestConfigs[?SpotFleetRequestState==`active` || SpotFleetRequestState==`submitted`].SpotFleetRequestId' \
+    --output text 2>/dev/null) || true
+
+  if [[ -n "$sfrs" && "$sfrs" != "None" ]]; then
+    for sfr in $sfrs; do
+      nuke_log "Spot Fleet Req" "$region" "$sfr"
+      aws ec2 cancel-spot-fleet-requests --spot-fleet-request-ids "$sfr" \
+        --terminate-instances --region "$region" 2>/dev/null || true
+    done
+  fi
+
+  # ── EC2 Fleets (newer Fleet API — planned use for multi-node clusters) ─
+  # --terminate-instances kills the instances the fleet spawned in the same call.
+  local fleets
+  fleets=$(aws ec2 describe-fleets \
+    --region "$region" \
+    --filters "Name=fleet-state,Values=submitted,active,modifying" \
+    --query 'Fleets[].FleetId' \
+    --output text 2>/dev/null) || true
+
+  if [[ -n "$fleets" && "$fleets" != "None" ]]; then
+    for fleet in $fleets; do
+      nuke_log "EC2 Fleet" "$region" "$fleet"
+      aws ec2 delete-fleets --fleet-ids "$fleet" \
+        --terminate-instances --region "$region" 2>/dev/null || true
+    done
+  fi
+
+  # ══════════════════════════════════════════════════════════════════
+  # STEP 1+: Terminate everything that costs money.
+  # ══════════════════════════════════════════════════════════════════
 
   # ── EC2 Instances ──────────────────────────────────────────────
   local instances
@@ -260,6 +335,184 @@ nuke_region() {
       aws ec2 delete-key-pair --key-name "$key" --region "$region" 2>/dev/null || true
     done
   fi
+
+  # ══════════════════════════════════════════════════════════════════
+  # STEP 2: Cleanup of resources that were REFERENCED by things we
+  # just deleted (Launch Templates → Fleets, AMIs → instances, VPC →
+  # everything). Safe to run after instances/fleets are gone.
+  #
+  # NAME-FILTERED (only delete resources matching our project prefix)
+  # for AMIs / snapshots / VPCs / CW logs so this script stays safe
+  # in accounts that host unrelated workloads.
+  # ══════════════════════════════════════════════════════════════════
+
+  # ── Launch Templates (Fleet API uses these; unconditional cleanup) ─
+  local lts
+  lts=$(aws ec2 describe-launch-templates \
+    --region "$region" \
+    --query 'LaunchTemplates[].LaunchTemplateId' \
+    --output text 2>/dev/null) || true
+
+  if [[ -n "$lts" && "$lts" != "None" ]]; then
+    for lt in $lts; do
+      nuke_log "Launch Template" "$region" "$lt"
+      aws ec2 delete-launch-template --launch-template-id "$lt" \
+        --region "$region" 2>/dev/null || true
+    done
+  fi
+
+  # ── AMIs owned by self (filtered by name prefix) ───────────────
+  local amis
+  amis=$(aws ec2 describe-images \
+    --owners self \
+    --region "$region" \
+    --query 'Images[?starts_with(Name,`blockchain`) || starts_with(Name,`k3s`) || starts_with(Name,`custom-consensus`)].ImageId' \
+    --output text 2>/dev/null) || true
+
+  if [[ -n "$amis" && "$amis" != "None" ]]; then
+    for ami in $amis; do
+      nuke_log "AMI" "$region" "$ami"
+      aws ec2 deregister-image --image-id "$ami" \
+        --region "$region" 2>/dev/null || true
+    done
+  fi
+
+  # ── EBS Snapshots owned by self (filtered by description prefix) ─
+  local snaps
+  snaps=$(aws ec2 describe-snapshots \
+    --owner-ids self \
+    --region "$region" \
+    --query 'Snapshots[?starts_with(Description,`blockchain`) || starts_with(Description,`k3s`) || starts_with(Description,`custom-consensus`) || contains(Description,`for blockchain`) || contains(Description,`for k3s`)].SnapshotId' \
+    --output text 2>/dev/null) || true
+
+  if [[ -n "$snaps" && "$snaps" != "None" ]]; then
+    for snap in $snaps; do
+      nuke_log "EBS Snapshot" "$region" "$snap"
+      aws ec2 delete-snapshot --snapshot-id "$snap" \
+        --region "$region" 2>/dev/null || true
+    done
+  fi
+
+  # ── Placement Groups (unconditional — always project-specific) ──
+  local pgs
+  pgs=$(aws ec2 describe-placement-groups \
+    --region "$region" \
+    --query 'PlacementGroups[].GroupName' \
+    --output text 2>/dev/null) || true
+
+  if [[ -n "$pgs" && "$pgs" != "None" ]]; then
+    for pg in $pgs; do
+      nuke_log "Placement Group" "$region" "$pg"
+      aws ec2 delete-placement-group --group-name "$pg" \
+        --region "$region" 2>/dev/null || true
+    done
+  fi
+
+  # ── CloudWatch Log Groups (filtered by name prefix) ─────────────
+  local lgs
+  lgs=$(aws logs describe-log-groups \
+    --region "$region" \
+    --query 'logGroups[?starts_with(logGroupName,`/aws/blockchain`) || starts_with(logGroupName,`/aws/k3s`) || starts_with(logGroupName,`/aws/custom-consensus`) || starts_with(logGroupName,`blockchain`) || starts_with(logGroupName,`k3s`)].logGroupName' \
+    --output text 2>/dev/null) || true
+
+  if [[ -n "$lgs" && "$lgs" != "None" ]]; then
+    for lg in $lgs; do
+      nuke_log "CloudWatch LG" "$region" "$lg"
+      aws logs delete-log-group --log-group-name "$lg" \
+        --region "$region" 2>/dev/null || true
+    done
+  fi
+
+  # ── Custom VPCs — full teardown in dependency order ────────────
+  # Only touches VPCs that are (a) non-default AND (b) tagged with a
+  # project-prefix Name. Teardown order: endpoints → subnets → IGW
+  # detach + delete → non-main route tables → non-default ACLs → VPC.
+  local vpcs
+  vpcs=$(aws ec2 describe-vpcs \
+    --region "$region" \
+    --filters "Name=isDefault,Values=false" \
+    --query 'Vpcs[?Tags[?Key==`Name` && (starts_with(Value,`blockchain`) || starts_with(Value,`k3s`) || starts_with(Value,`custom-consensus`))]].VpcId' \
+    --output text 2>/dev/null) || true
+
+  if [[ -n "$vpcs" && "$vpcs" != "None" ]]; then
+    for vpc in $vpcs; do
+      nuke_log "VPC (teardown)" "$region" "$vpc"
+
+      # VPC endpoints (would block VPC delete)
+      local vpces
+      vpces=$(aws ec2 describe-vpc-endpoints \
+        --region "$region" \
+        --filters "Name=vpc-id,Values=$vpc" \
+        --query 'VpcEndpoints[].VpcEndpointId' \
+        --output text 2>/dev/null) || true
+      if [[ -n "$vpces" && "$vpces" != "None" ]]; then
+        aws ec2 delete-vpc-endpoints --vpc-endpoint-ids $vpces \
+          --region "$region" 2>/dev/null || true
+      fi
+
+      # Subnets
+      local subnets
+      subnets=$(aws ec2 describe-subnets \
+        --region "$region" \
+        --filters "Name=vpc-id,Values=$vpc" \
+        --query 'Subnets[].SubnetId' \
+        --output text 2>/dev/null) || true
+      for subnet in $subnets; do
+        [[ -n "$subnet" && "$subnet" != "None" ]] || continue
+        nuke_log "Subnet" "$region" "$subnet"
+        aws ec2 delete-subnet --subnet-id "$subnet" \
+          --region "$region" 2>/dev/null || true
+      done
+
+      # Internet gateways (detach then delete)
+      local igws
+      igws=$(aws ec2 describe-internet-gateways \
+        --region "$region" \
+        --filters "Name=attachment.vpc-id,Values=$vpc" \
+        --query 'InternetGateways[].InternetGatewayId' \
+        --output text 2>/dev/null) || true
+      for igw in $igws; do
+        [[ -n "$igw" && "$igw" != "None" ]] || continue
+        nuke_log "Internet GW" "$region" "$igw"
+        aws ec2 detach-internet-gateway --internet-gateway-id "$igw" \
+          --vpc-id "$vpc" --region "$region" 2>/dev/null || true
+        aws ec2 delete-internet-gateway --internet-gateway-id "$igw" \
+          --region "$region" 2>/dev/null || true
+      done
+
+      # Non-main route tables
+      local rtbs
+      rtbs=$(aws ec2 describe-route-tables \
+        --region "$region" \
+        --filters "Name=vpc-id,Values=$vpc" \
+        --query 'RouteTables[?!(Associations[?Main==`true`])].RouteTableId' \
+        --output text 2>/dev/null) || true
+      for rtb in $rtbs; do
+        [[ -n "$rtb" && "$rtb" != "None" ]] || continue
+        nuke_log "Route Table" "$region" "$rtb"
+        aws ec2 delete-route-table --route-table-id "$rtb" \
+          --region "$region" 2>/dev/null || true
+      done
+
+      # Non-default network ACLs
+      local nacls
+      nacls=$(aws ec2 describe-network-acls \
+        --region "$region" \
+        --filters "Name=vpc-id,Values=$vpc" \
+        --query 'NetworkAcls[?!IsDefault].NetworkAclId' \
+        --output text 2>/dev/null) || true
+      for nacl in $nacls; do
+        [[ -n "$nacl" && "$nacl" != "None" ]] || continue
+        nuke_log "Network ACL" "$region" "$nacl"
+        aws ec2 delete-network-acl --network-acl-id "$nacl" \
+          --region "$region" 2>/dev/null || true
+      done
+
+      # Finally the VPC itself
+      aws ec2 delete-vpc --vpc-id "$vpc" \
+        --region "$region" 2>/dev/null || true
+    done
+  fi
 }
 
 nuke_global() {
@@ -272,6 +525,73 @@ nuke_global() {
     for bucket in $buckets; do
       nuke_log "S3 Bucket" "global" "$bucket"
       aws s3 rb "s3://$bucket" --force 2>/dev/null || true
+    done
+  fi
+
+  # ── IAM Instance Profiles (filtered by name prefix) ───────────
+  # Delete profiles BEFORE roles: a profile that references a role
+  # blocks that role's deletion. Also detach the role from the
+  # profile first (remove-role-from-instance-profile).
+  local profiles
+  profiles=$(aws iam list-instance-profiles \
+    --query 'InstanceProfiles[?starts_with(InstanceProfileName,`blockchain`) || starts_with(InstanceProfileName,`k3s`) || starts_with(InstanceProfileName,`custom-consensus`)].InstanceProfileName' \
+    --output text 2>/dev/null) || true
+
+  if [[ -n "$profiles" && "$profiles" != "None" ]]; then
+    for profile in $profiles; do
+      # Detach any roles from the profile first
+      local profile_roles
+      profile_roles=$(aws iam get-instance-profile \
+        --instance-profile-name "$profile" \
+        --query 'InstanceProfile.Roles[].RoleName' \
+        --output text 2>/dev/null) || true
+      for pr in $profile_roles; do
+        [[ -n "$pr" && "$pr" != "None" ]] || continue
+        aws iam remove-role-from-instance-profile \
+          --instance-profile-name "$profile" \
+          --role-name "$pr" 2>/dev/null || true
+      done
+      nuke_log "IAM Instance Profile" "global" "$profile"
+      aws iam delete-instance-profile \
+        --instance-profile-name "$profile" 2>/dev/null || true
+    done
+  fi
+
+  # ── IAM Roles (filtered by name prefix — skips AWS-service-linked) ─
+  # Roles have attached policies and inline policies that must be
+  # removed before the role can be deleted. AWS-service-linked roles
+  # (path starts with /aws-service-role/) are automatically excluded.
+  local roles
+  roles=$(aws iam list-roles \
+    --query 'Roles[?(starts_with(RoleName,`blockchain`) || starts_with(RoleName,`k3s`) || starts_with(RoleName,`custom-consensus`)) && !starts_with(Path,`/aws-service-role/`)].RoleName' \
+    --output text 2>/dev/null) || true
+
+  if [[ -n "$roles" && "$roles" != "None" ]]; then
+    for role in $roles; do
+      # Detach managed policies
+      local mps
+      mps=$(aws iam list-attached-role-policies \
+        --role-name "$role" \
+        --query 'AttachedPolicies[].PolicyArn' \
+        --output text 2>/dev/null) || true
+      for mp in $mps; do
+        [[ -n "$mp" && "$mp" != "None" ]] || continue
+        aws iam detach-role-policy --role-name "$role" --policy-arn "$mp" \
+          2>/dev/null || true
+      done
+      # Delete inline policies
+      local ips
+      ips=$(aws iam list-role-policies \
+        --role-name "$role" \
+        --query 'PolicyNames[]' \
+        --output text 2>/dev/null) || true
+      for ip in $ips; do
+        [[ -n "$ip" && "$ip" != "None" ]] || continue
+        aws iam delete-role-policy --role-name "$role" --policy-name "$ip" \
+          2>/dev/null || true
+      done
+      nuke_log "IAM Role" "global" "$role"
+      aws iam delete-role --role-name "$role" 2>/dev/null || true
     done
   fi
 
@@ -324,6 +644,12 @@ else
 fi
 echo ""
 
-# Clean up local key files
+# Clean up local tmp files from crashed runs (normally cleared by run-on-aws.sh
+# trap on graceful exit; these are here as a safety net for interrupted runs).
 rm -f /tmp/blockchain-test-key-*.pem 2>/dev/null || true
-info "Cleaned up local key files."
+rm -f /tmp/blockchain-userdata-*.sh 2>/dev/null || true
+# ControlMaster sockets — leaked if the parent SSH session was killed abruptly.
+rm -f /tmp/ssh-ctl-* 2>/dev/null || true
+# Kube-batch temp directories from start.sh batched-apply (any left over)
+rm -rf /tmp/kube-batches-* 2>/dev/null || true
+info "Cleaned up local tmp files (keys, userdata, ssh-ctl sockets, batches)."

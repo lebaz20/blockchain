@@ -62,7 +62,12 @@ app.get('/blocks', (request, response) => {
 
 // sends the chain stats to the user
 app.get('/stats', async (request, response) => {
-  const rate = await blockchain.getRate(p2pserver.sockets)
+  // getRate() computes shardSize as Object.keys(sockets).length + 1. In
+  // rapidchain, p2pserver.sockets is nested { peers, committeePeers } — so
+  // passing the whole object made shardSize always report 3 (2 property
+  // names + self) and shardStatus stuck at FAULTY. Pass sockets.peers so
+  // the returned rate matches what p2pserver.js sends to the core.
+  const rate = await blockchain.getRate(p2pserver.sockets.peers)
   const { IS_FAULTY } = config.get()
   const stats = {
     total: blockchain.getTotal(),
