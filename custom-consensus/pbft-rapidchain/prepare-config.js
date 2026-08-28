@@ -182,12 +182,13 @@ const memory = `${process.env.POD_MEMORY_MIB || 256}Mi`
 // committee finalises them. Observed 2026-08-01 at N=128 NPS=25: core-server
 // hit Node.js heap limit (~660 MiB) after processing 449 committee messages
 // and crashed with "Reached heap limit" — killed the whole committee flow.
-// Give it 4× the p2p pod memory, floor 1024 MiB, cap 3072 MiB so it fits a
-// c6i.large agent (4 GiB) with ~1 GiB left for OS + k3s. NODE_OPTIONS pins
-// V8's heap ceiling to 80 % of the pod cap so V8 GCs before the kernel OOM-kills.
+// Core-server targets the control-plane node via nodeAffinity (Exists on the
+// node-role.kubernetes.io/control-plane label) with tolerations for the common
+// NoSchedule taint. Cap 2048 MiB fits on a c6i.large (4 GiB) master alongside
+// k3s, OS, and JMeter. NODE_OPTIONS pins V8's heap ceiling to 80% of the cap.
 const _corePodMib = Math.min(
-  3072,
-  Math.max(1024, Number(process.env.POD_MEMORY_MIB || 256) * 4)
+  2048,
+  Math.max(512, Number(process.env.POD_MEMORY_MIB || 256))
 )
 const coreMemory = `${_corePodMib}Mi`
 const coreNodeOptions = `--max-old-space-size=${Math.floor(_corePodMib * 0.8)}`
@@ -323,6 +324,22 @@ const k8sItems = [
       labels: { app: 'core-server', domain: 'blockchain' }
     },
     spec: {
+      tolerations: [
+        { key: 'node-role.kubernetes.io/control-plane', operator: 'Exists', effect: 'NoSchedule' },
+        { key: 'node-role.kubernetes.io/master', operator: 'Exists', effect: 'NoSchedule' }
+      ],
+      affinity: {
+        nodeAffinity: {
+          requiredDuringSchedulingIgnoredDuringExecution: {
+            nodeSelectorTerms: [{
+              matchExpressions: [{
+                key: 'node-role.kubernetes.io/control-plane',
+                operator: 'Exists'
+              }]
+            }]
+          }
+        }
+      },
       ...(process.env.USE_HOST_NETWORK === 'true'
         ? { hostNetwork: true, dnsPolicy: 'ClusterFirstWithHostNet' }
         : {}),

@@ -52,6 +52,26 @@ diag_snapshot() {
     log "${YELLOW}════════ END DIAG SNAPSHOT ════════${NC}"
 }
 
+# ── Local-mode preset ────────────────────────────────────────────────────────
+# Set LOCAL_MODE=1 to run on a laptop (Rancher Desktop / Docker Desktop k8s).
+# Applies conservative defaults: tiny cluster, minimal JMeter load, reduced
+# memory caps.  Explicit env vars set before invoking this script always win.
+if [ "${LOCAL_MODE:-0}" = "1" ]; then
+    : "${NUMBER_OF_NODES:=4}"
+    : "${NUMBER_OF_NODES_PER_SHARD:=4}"
+    : "${NUMBER_OF_FAULTY_NODES:=0}"
+    : "${HAS_COMMITTEE_SHARD:=0}"
+    : "${TRANSACTION_THRESHOLD:=20}"
+    : "${CPU_LIMIT:=0.25}"
+    : "${JMETER_THREADS:=3}"
+    : "${JMETER_DURATION:=30}"
+    : "${JMETER_THROUGHPUT:=600}"
+    : "${STARTUP_BATCH_SIZE:=4}"
+    : "${STARTUP_BATCH_WAIT_SEC:=3}"
+    log "${YELLOW}LOCAL_MODE=1: laptop-friendly defaults applied (3 JMeter threads, 30s run, memory auto-scaled by NPS)${NC}"
+    log "${YELLOW}  Override any variable before running to change individual settings.${NC}"
+fi
+
 # Configuration (use defaults from start.sh if not set)
 export NUMBER_OF_NODES=${NUMBER_OF_NODES:-512}
 export TRANSACTION_THRESHOLD=${TRANSACTION_THRESHOLD:-100}
@@ -61,6 +81,60 @@ export NUMBER_OF_NODES_PER_SHARD=${NUMBER_OF_NODES_PER_SHARD:-12}
 export HAS_COMMITTEE_SHARD=${HAS_COMMITTEE_SHARD:-1}
 export SHOULD_REDIRECT_FROM_FAULTY_NODES=${SHOULD_REDIRECT_FROM_FAULTY_NODES:-0}
 export CPU_LIMIT=${CPU_LIMIT:-0.2}
+export POD_MEMORY_MIB=${POD_MEMORY_MIB:-}
+
+# ── NPS-aware auto-tuning ─────────────────────────────────────────────────────
+# RapidChain has an additional committee layer that also runs PBFT, making it
+# more sensitive to high NPS than EnhancedBFT.  Same scaling rules apply.
+_NPS=${NUMBER_OF_NODES_PER_SHARD:-4}
+if [ "${_NPS}" -ge 32 ]; then
+    : "${TRANSACTION_THRESHOLD:=500}"
+    : "${CPU_LIMIT:=$(python3 -c "print(f'{min(4.0, 0.30 * (${_NPS}/4.0)**0.5):.2f}')")}"
+    : "${JMETER_THREADS:=100}"
+    _NPS_STABILIZE_TIMEOUT=600
+    _NPS_MEMORY_MIB=$(python3 -c "print(min(3584, int(256 * (${_NPS}/4.0))))")
+    log "${YELLOW}NPS=${_NPS} (≥32): conservative params — threshold=${TRANSACTION_THRESHOLD}, threads=${JMETER_THREADS}, stabilize=${_NPS_STABILIZE_TIMEOUT}s, memory=${_NPS_MEMORY_MIB}MiB${NC}"
+    log "${YELLOW}  RapidChain's committee PBFT at NPS=32 is exploratory territory.${NC}"
+elif [ "${_NPS}" -ge 16 ]; then
+    : "${TRANSACTION_THRESHOLD:=1000}"
+    : "${CPU_LIMIT:=$(python3 -c "print(f'{min(4.0, 0.30 * (${_NPS}/4.0)**0.5):.2f}')")}"
+    : "${JMETER_THREADS:=200}"
+    _NPS_STABILIZE_TIMEOUT=300
+    _NPS_MEMORY_MIB=$(python3 -c "print(min(3584, int(256 * (${_NPS}/4.0))))")
+    log "${YELLOW}NPS=${_NPS} (≥16): auto-tuned — threshold=${TRANSACTION_THRESHOLD}, threads=${JMETER_THREADS}, stabilize=${_NPS_STABILIZE_TIMEOUT}s, memory=${_NPS_MEMORY_MIB}MiB${NC}"
+elif [ "${_NPS}" -ge 8 ]; then
+    _NPS_STABILIZE_TIMEOUT=450
+    _NPS_MEMORY_MIB=$(python3 -c "print(min(3584, int(256 * (${_NPS}/4.0))))")
+else
+    _NPS_STABILIZE_TIMEOUT=300
+    _NPS_MEMORY_MIB=256
+fi
+export TRANSACTION_THRESHOLD
+: "${POD_MEMORY_MIB:=${_NPS_MEMORY_MIB:-256}}"
+export POD_MEMORY_MIB
+export DRAIN_BATCH_SIZE=${DRAIN_BATCH_SIZE:-${TRANSACTION_THRESHOLD}}
+
+# In LOCAL_MODE, cap pod memory to laptop-friendly limits.
+# Formula: max(128, 128 + 8×NPS) → 160/192/256/384 MiB for NPS 4/8/16/32.
+if [ "${LOCAL_MODE:-0}" = "1" ]; then
+    _LOCAL_MEM_CAP=$(python3 -c "print(max(256, 128 + 8 * ${_NPS}))")
+    if [ "${POD_MEMORY_MIB}" -gt "${_LOCAL_MEM_CAP}" ] 2>/dev/null; then
+        POD_MEMORY_MIB=${_LOCAL_MEM_CAP}
+        export POD_MEMORY_MIB
+        log "${YELLOW}LOCAL_MODE: POD_MEMORY_MIB capped to ${POD_MEMORY_MIB}MiB for NPS=${_NPS} (production would be ${_NPS_MEMORY_MIB:-256}MiB)${NC}"
+    fi
+    # CPU: Kubernetes sets requests=limits when only limits are specified.
+    # With 10 vCPU allocatable, cap so all pods fit: min(0.25, 9.0/total_pods).
+    _TOTAL_PODS=$((NUMBER_OF_NODES + 1))
+    _LOCAL_CPU_CAP=$(python3 -c "print(f'{min(0.25, 9.0 / ${_TOTAL_PODS}):.2f}')")
+    if python3 -c "exit(0 if float('${CPU_LIMIT}') <= float('${_LOCAL_CPU_CAP}') else 1)" 2>/dev/null; then
+        true
+    else
+        CPU_LIMIT=${_LOCAL_CPU_CAP}
+        export CPU_LIMIT
+        log "${YELLOW}LOCAL_MODE: CPU_LIMIT scaled to ${CPU_LIMIT} vCPU for ${_TOTAL_PODS} pods (fits 10-vCPU node)${NC}"
+    fi
+fi
 
 # JMeter configuration
 JMETER_THREADS=${JMETER_THREADS:-10}
@@ -122,6 +196,22 @@ cleanup() {
     # if no socat processes are alive)
     pkill -f "socat TCP-LISTEN" 2>/dev/null || true
     pkill -f "kubectl logs" 2>/dev/null || true
+
+    # Stop background monitors before deleting pods
+    [ -n "${_HEARTBEAT_PID:-}" ] && kill "$_HEARTBEAT_PID" 2>/dev/null || true
+    [ -n "${_OOMKILL_PID:-}"   ] && kill "$_OOMKILL_PID"   2>/dev/null || true
+
+    # Flag OOMKilled pods before deletion so the evidence is in server.log
+    kubectl get pods -l domain=blockchain -o json 2>/dev/null \
+        | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for p in d.get('items', []):
+    name = p['metadata']['name']
+    for cs in p.get('status', {}).get('containerStatuses', []):
+        if cs.get('lastState', {}).get('terminated', {}).get('reason') == 'OOMKilled':
+            print(f'OOMKilled: {name}  restartCount={cs.get(\"restartCount\",0)}')
+" 2>/dev/null | tee -a server.log || true
 
     # Post-hoc log dump — the live streams only cover a handful of pods (to
     # avoid saturating the k3s master with SPDY streams). This dumps the full
@@ -292,10 +382,10 @@ if [ "${NUMBER_OF_NODES}" -gt 32 ]; then
     # Large shards (NPS>20) need higher MIN_APPROVALS quorums to form; each pod
     # can't report non-FAULTY until it sees floor(2·(NPS-1)/3)+1 peers, and the
     # startup batching in start.sh means the mesh takes longer to converge.
-    if [ "${NUMBER_OF_NODES_PER_SHARD}" -gt 20 ]; then
+    # _NPS_STABILIZE_TIMEOUT is set by the NPS-aware auto-tuning block above
+    STABILIZE_TIMEOUT=${_NPS_STABILIZE_TIMEOUT:-300}
+    if [ "${NUMBER_OF_NODES_PER_SHARD}" -gt 20 ] && [ "$STABILIZE_TIMEOUT" -lt 600 ]; then
         STABILIZE_TIMEOUT=600
-    else
-        STABILIZE_TIMEOUT=300
     fi
     STABILIZE_ELAPSED=0
     while [ $STABILIZE_ELAPSED -lt $STABILIZE_TIMEOUT ]; do
@@ -310,7 +400,7 @@ if [ "${NUMBER_OF_NODES}" -gt 32 ]; then
         HEALTHY_COUNT=$(
             for ((i=0; i<NUMBER_OF_NODES; i+=SAMPLE_STRIDE)); do
                 PORT=$((3001 + i))
-                curl -s --max-time 10 http://localhost:$PORT/stats 2>/dev/null || true
+                curl -s --max-time 30 http://localhost:$PORT/stats 2>/dev/null || true
                 echo  # newline delimiter so Python parses each response as a separate line
             done | python3 -c "
 import sys, json
@@ -434,6 +524,103 @@ log "  Ramp-up: ${JMETER_RAMP_UP}s"
 log "  Ramp-down: ${JMETER_RAMP_DOWN}s"
 echo
 
+# ── Pre-exhaustion monitoring ─────────────────────────────────────────────────
+_HEARTBEAT_FILE="${RESULTS_DIR}/heartbeat-stats-${TIMESTAMP}.jsonl"
+_HB_USE_EXEC="${USE_HOST_NETWORK:-}"
+_HB_SPREAD="${SPREAD_PODS_ACROSS_NODES:-}"
+
+# Build pod→IP map once (hostNetwork: pod IP = host IP, directly reachable via VPC).
+# Avoids kubectl exec → kubelet (port 10250) which fails with 502 on multi-EC2 k3s.
+_POD_IP_MAP_FILE=$(mktemp)
+if [ "${USE_HOST_NETWORK:-}" = "true" ] && [ "${SPREAD_PODS_ACROSS_NODES:-}" = "true" ]; then
+    kubectl get pods -o wide --no-headers 2>/dev/null \
+        | awk '/^p2p-server-/{print $1, $6}' > "$_POD_IP_MAP_FILE"
+fi
+(
+    _hb_interval=60
+    while true; do
+        sleep $_hb_interval
+        _ts=$(date +%s)
+        _hb_tmp=$(mktemp -d)
+        if [ "$_HB_USE_EXEC" = "true" ] && [ "$_HB_SPREAD" = "true" ]; then
+            # Refresh map each heartbeat: pods may have gotten IPs since last build.
+            kubectl get pods -o wide --no-headers 2>/dev/null \
+                | awk '/^p2p-server-/{print $1, $6}' > "$_POD_IP_MAP_FILE"
+            for ((i=0; i<NUMBER_OF_NODES; i++)); do
+                PORT=$((3001+i))
+                _pod_ip=$(grep "^p2p-server-$i " "$_POD_IP_MAP_FILE" 2>/dev/null | awk '{print $2}')
+                if [ -n "$_pod_ip" ]; then
+                    curl -s --max-time 3 "http://${_pod_ip}:${PORT}/stats" > "$_hb_tmp/$i.json" 2>/dev/null &
+                fi
+            done
+        else
+            for ((i=0; i<NUMBER_OF_NODES; i++)); do
+                PORT=$((3001+i))
+                curl -s --max-time 3 "http://localhost:$PORT/stats" > "$_hb_tmp/$i.json" 2>/dev/null &
+            done
+        fi
+        wait
+        _snap=$(python3 - "$_hb_tmp" "$NUMBER_OF_NODES" "$_ts" << 'HB_PY'
+import sys, json, os
+stats_dir, num_nodes, ts_str = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+totals = {}; responded = 0; round_ms_list = []
+for i in range(num_nodes):
+    fpath = os.path.join(stats_dir, f"{i}.json")
+    if not os.path.exists(fpath) or os.path.getsize(fpath) == 0: continue
+    try:
+        d = json.loads(open(fpath).read())
+        if d.get('isFaulty'): continue
+        responded += 1
+        for k,v in d.get('total',{}).items():
+            totals[k] = {'tx': max(totals.get(k,{}).get('tx',0), v.get('transactions',0)),
+                         'blocks': max(totals.get(k,{}).get('blocks',0), v.get('blocks',0))}
+        arm = d.get('avgRoundMs')
+        if arm and arm > 0: round_ms_list.append(arm)
+    except: pass
+total_tx = sum(v['tx'] for v in totals.values())
+total_bl = sum(v['blocks'] for v in totals.values())
+med_rm = sorted(round_ms_list)[len(round_ms_list)//2] if round_ms_list else 0
+print(json.dumps({'ts': int(ts_str), 'responded': responded, 'total_tx': total_tx,
+                  'total_blocks': total_bl, 'median_round_ms': med_rm}))
+HB_PY
+) 2>/dev/null || echo '{"ts":'$_ts',"error":"snap_failed"}'
+        rm -rf "$_hb_tmp"
+        echo "$_snap" >> "$_HEARTBEAT_FILE"
+    done
+) &
+_HEARTBEAT_PID=$!
+
+_OOMKILL_LOG="${RESULTS_DIR}/oomkill-events-${TIMESTAMP}.txt"
+_OOMKILL_SEEN=""
+(
+    while true; do
+        sleep 30
+        _victims=$(kubectl get pods -l domain=blockchain -o json 2>/dev/null \
+            | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for p in d.get('items', []):
+    name = p['metadata']['name']
+    for cs in p.get('status', {}).get('containerStatuses', []):
+        if cs.get('lastState', {}).get('terminated', {}).get('reason') == 'OOMKilled':
+            print(name)
+" 2>/dev/null || true)
+        for _victim in $_victims; do
+            if ! echo "$_OOMKILL_SEEN" | grep -qF "$_victim"; then
+                _OOMKILL_SEEN="$_OOMKILL_SEEN $_victim"
+                {
+                    echo "=== OOMKill: $_victim at $(date '+%Y-%m-%d %H:%M:%S') ==="
+                    kubectl logs "$_victim" --tail=50 2>/dev/null || echo "(logs unavailable)"
+                    echo "=== kubectl top ==="
+                    kubectl top pods -l domain=blockchain --no-headers 2>/dev/null | sort -k3 -rh | head -10 || true
+                } >> "$_OOMKILL_LOG" 2>&1
+                log "${RED}⚠ OOMKill: $_victim — saved to $(basename "$_OOMKILL_LOG")${NC}"
+            fi
+        done
+    done
+) &
+_OOMKILL_PID=$!
+
 # Start port-forward watchdog (only when not using hostNetwork)
 if [ "${USE_HOST_NETWORK:-}" != "true" ]; then
 (
@@ -466,12 +653,23 @@ jmeter -n -t "Test Plan.jmx" \
     -l "${RESULTS_FILE}" \
     -e -o "${RESULTS_DIR}/pbft-rapidchain-${TIMESTAMP}-report" 2>&1 | tee -a server.log
 
-# Kill watchdog
-if [ -n "${WATCHDOG_PID:-}" ]; then
-    kill $WATCHDOG_PID 2>/dev/null || true
-fi
+# Kill watchdog; keep heartbeat + OOMKill monitors running through drain
+if [ -n "${WATCHDOG_PID:-}" ]; then kill $WATCHDOG_PID 2>/dev/null || true; fi
 
 log "${GREEN}✓ JMeter test completed${NC}"
+
+# Intermediate save: write JMeter-only partial stats so they survive if drain crashes
+_PARTIAL_STATS="${RESULTS_DIR}/pbft-rapidchain-${TIMESTAMP}-partial.csv"
+if [ -f "${RESULTS_FILE}" ]; then
+    {
+        echo "Metric,Value"
+        awk -F',' 'NR>1 {count++} END {print "Total Samples," count+0}' "${RESULTS_FILE}"
+        awk -F',' 'NR>1 {sum+=$2;count++} END {print "Average Response Time (ms)," int(sum/(count?count:1))}' "${RESULTS_FILE}"
+        awk -F',' 'NR>1 && $8=="true" {ok++} NR>1 {tot++} END {printf "Success Rate (%%),%s\n", (tot>0?ok*100/tot:0)}' "${RESULTS_FILE}"
+        echo "Partial Save At,$(date '+%Y-%m-%d %H:%M:%S')"
+    } > "$_PARTIAL_STATS" 2>/dev/null || true
+    log "Intermediate JMeter stats saved: $(basename "$_PARTIAL_STATS")"
+fi
 
 # Ramp-down quiet phase: no new transactions; blockchain completes in-flight blocks
 if [ "${JMETER_RAMP_DOWN}" -gt 0 ]; then
@@ -493,6 +691,11 @@ fi
 # Wait for transaction pool to drain (wait until unassigned hits 0)
 write_phase "drain: waiting for TX pool to drain"
 log "${BLUE}Waiting for transaction pool to drain...${NC}"
+# Rebuild pod IP map: all pods are now Running, so all IPs should be available.
+if [ "${USE_HOST_NETWORK:-}" = "true" ] && [ "${SPREAD_PODS_ACROSS_NODES:-}" = "true" ]; then
+    kubectl get pods -o wide --no-headers 2>/dev/null \
+        | awk '/^p2p-server-/{print $1, $6}' > "$_POD_IP_MAP_FILE"
+fi
 DRAIN_TIMEOUT=60
 DRAIN_ELAPSED=0
 PREV_UNASSIGNED=-1
@@ -511,11 +714,23 @@ while [ $DRAIN_ELAPSED -lt $DRAIN_TIMEOUT ]; do
     VALID_SAMPLES=0
     OFFSET=0
     while [ $(( OFFSET * STEP )) -lt $NUMBER_OF_NODES ]; do
-        IDX=$(( OFFSET * STEP ))
-        PORT=$((3001+IDX))
-        DRAIN_STATS=$(curl -s --max-time 5 http://localhost:$PORT/stats 2>/dev/null || echo '')
-        if [ -n "$DRAIN_STATS" ]; then
-            NODE_UNASSIGNED=$(echo "$DRAIN_STATS" | python3 -c "
+        IDX_BASE=$(( OFFSET * STEP ))
+        _SHARD_GOT_SAMPLE=0
+        # Try up to 3 nodes per shard: if the first (e.g. OOM-killed) is unreachable,
+        # fall through to its neighbours which should still be honest and responding.
+        _MAX_SHARD_TRIES=$(( STEP < 3 ? STEP : 3 ))
+        for ((_SHARD_TRY=0; _SHARD_TRY<_MAX_SHARD_TRIES && _SHARD_GOT_SAMPLE==0; _SHARD_TRY++)); do
+            IDX=$(( IDX_BASE + _SHARD_TRY ))
+            [ $IDX -ge $NUMBER_OF_NODES ] && break
+            PORT=$((3001+IDX))
+            if [ "${USE_HOST_NETWORK:-}" = "true" ] && [ "${SPREAD_PODS_ACROSS_NODES:-}" = "true" ]; then
+                _drain_ip=$(grep "^p2p-server-$IDX " "$_POD_IP_MAP_FILE" 2>/dev/null | awk '{print $2}')
+                DRAIN_STATS=$(curl -s --max-time 5 "http://${_drain_ip}:${PORT}/stats" 2>/dev/null || echo '')
+            else
+                DRAIN_STATS=$(curl -s --max-time 5 http://localhost:$PORT/stats 2>/dev/null || echo '')
+            fi
+            if [ -n "$DRAIN_STATS" ]; then
+                NODE_UNASSIGNED=$(echo "$DRAIN_STATS" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -526,11 +741,13 @@ try:
         print(total)
 except: print(-1)
 " 2>/dev/null || echo -1)
-            if [ "$NODE_UNASSIGNED" != "-1" ]; then
-                SUM_UNASSIGNED=$(( SUM_UNASSIGNED + NODE_UNASSIGNED ))
-                VALID_SAMPLES=$(( VALID_SAMPLES + 1 ))
+                if [ "$NODE_UNASSIGNED" != "-1" ]; then
+                    SUM_UNASSIGNED=$(( SUM_UNASSIGNED + NODE_UNASSIGNED ))
+                    VALID_SAMPLES=$(( VALID_SAMPLES + 1 ))
+                    _SHARD_GOT_SAMPLE=1
+                fi
             fi
-        fi
+        done
         OFFSET=$(( OFFSET + 1 ))
     done
     # No valid samples means all polled nodes were unreachable/faulty — treat as unknown
@@ -606,14 +823,27 @@ log "${BLUE}Step 4: Collecting blockchain statistics...${NC}"
     TOTAL_UNASSIGNED_TX=0
     NODES_RESPONDED=0
 
-    # Fetch all node stats in parallel (128 sequential curls → 14s; parallel → ~1-2s).
-    # Each curl writes to a temp file; a single python3 script aggregates all results.
+    # Fetch all node stats in parallel. In multi-EC2 hostNetwork mode, use direct
+    # curl to pod IP (= host IP) — bypasses kubectl exec → kubelet (502 on k3s).
     STATS_TMP=$(mktemp -d)
     trap "rm -rf $STATS_TMP" RETURN 2>/dev/null || true
-    for ((i=0; i<NUMBER_OF_NODES; i++)); do
-        PORT=$((3001+i))
-        curl -s --max-time 10 "http://localhost:$PORT/stats" > "$STATS_TMP/$i.json" 2>/dev/null &
-    done
+    # Refresh pod IP map before final stats (pods may have moved since heartbeat build).
+    if [ "${USE_HOST_NETWORK:-}" = "true" ] && [ "${SPREAD_PODS_ACROSS_NODES:-}" = "true" ]; then
+        kubectl get pods -o wide --no-headers 2>/dev/null \
+            | awk '/^p2p-server-/{print $1, $6}' > "$_POD_IP_MAP_FILE"
+        for ((i=0; i<NUMBER_OF_NODES; i++)); do
+            PORT=$((3001+i))
+            _stats_ip=$(grep "^p2p-server-$i " "$_POD_IP_MAP_FILE" 2>/dev/null | awk '{print $2}')
+            if [ -n "$_stats_ip" ]; then
+                curl -s --max-time 30 "http://${_stats_ip}:${PORT}/stats" > "$STATS_TMP/$i.json" 2>/dev/null &
+            fi
+        done
+    else
+        for ((i=0; i<NUMBER_OF_NODES; i++)); do
+            PORT=$((3001+i))
+            curl -s --max-time 30 "http://localhost:$PORT/stats" > "$STATS_TMP/$i.json" 2>/dev/null &
+        done
+    fi
     wait
 
     # Single python3 invocation processes all node responses
@@ -625,6 +855,7 @@ num_nodes = int(sys.argv[2])
 shard_max = {}   # shard_idx -> {blocks, tx, unassigned}
 nodes_responded = 0
 per_shard_text = []
+round_ms_vals = []
 
 for i in range(num_nodes):
     fpath = os.path.join(stats_dir, f"{i}.json")
@@ -638,6 +869,9 @@ for i in range(num_nodes):
     if d.get("isFaulty", False):
         continue
     nodes_responded += 1
+    v = d.get("avgRoundMs")
+    if v and v > 0:
+        round_ms_vals.append(v)
     for shard_idx, vals in d.get("total", {}).items():
         blocks = vals.get("blocks", 0)
         tx = vals.get("transactions", 0)
@@ -662,18 +896,26 @@ for idx in sorted(shard_max.keys()):
     per_shard_text.append("")
     total_blocks += s["blocks"]; total_tx += s["tx"]; total_ua += s["ua"]
 
+median_round_ms = 0
+if round_ms_vals:
+    s = sorted(round_ms_vals)
+    n = len(s)
+    median_round_ms = (s[n//2] + s[(n-1)//2]) / 2
+
 print(f"NODES_RESPONDED={nodes_responded}")
 print(f"TOTAL_BLOCKS={total_blocks}")
 print(f"TOTAL_TX_IN_BLOCKS={total_tx}")
 print(f"TOTAL_UNASSIGNED_TX={total_ua}")
+print(f"MEDIAN_ROUND_MS={median_round_ms:.1f}")
 print("---SHARDS---")
 print("\n".join(per_shard_text) if per_shard_text else "  (No node responded to /stats query)")
 PYAGG
     )
     rm -rf "$STATS_TMP"
 
-    # Parse the aggregated output
-    eval "$(echo "$AGGREGATED" | sed -n '/^[A-Z_]*=/p')"
+    # Parse the aggregated output (captures NODES_RESPONDED, TOTAL_BLOCKS, ..., MEDIAN_ROUND_MS)
+    echo "$AGGREGATED" > "${RESULTS_DIR}/pyagg-debug-${TIMESTAMP}.txt" 2>/dev/null || true
+    eval "$(echo "$AGGREGATED" | sed -n '/^[A-Z_]*=[0-9.]*$/p')"
     SHARD_TEXT=$(echo "$AGGREGATED" | sed '1,/^---SHARDS---$/d')
 
     echo "$SHARD_TEXT"
@@ -700,6 +942,42 @@ PYAGG
     echo "  - Block creation in progress"
     echo "  - Test duration ended before block finalization"
 } | tee "${SUMMARY_FILE}" | tee -a server.log > /dev/null
+
+# MEDIAN_ROUND_MS was eval'd inside the pipeline subshell above, so it didn't
+# propagate.  Recover it from the debug file written inside the same subshell.
+if [ -f "${RESULTS_DIR}/pyagg-debug-${TIMESTAMP}.txt" ]; then
+    _MRM=$(grep '^MEDIAN_ROUND_MS=' "${RESULTS_DIR}/pyagg-debug-${TIMESTAMP}.txt" | cut -d= -f2)
+    [ -n "${_MRM}" ] && MEDIAN_ROUND_MS="${_MRM}"
+fi
+
+# ── Heartbeat floor: guard against OOM-killed nodes restarting and returning 0 ──
+# When a node is OOM-killed mid-run it restarts with block counter=0. The final
+# HTTP /stats sweep then hits the restarted node and reports 0. The heartbeat
+# file records the cumulative max BEFORE any kills, so use it as a floor.
+if [ -f "${_HEARTBEAT_FILE}" ] && [ -f "${SUMMARY_FILE}" ]; then
+    _HB_RESULT=$(python3 - "${_HEARTBEAT_FILE}" << 'HBPYEOF'
+import json, sys
+try:
+    lines = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+    best = max(lines, key=lambda l: l.get('total_blocks', 0), default={})
+    print(best.get('total_blocks', 0))
+    print(best.get('total_tx', 0))
+except Exception:
+    print(0); print(0)
+HBPYEOF
+    )
+    _HB_MAX_BLOCKS=$(echo "$_HB_RESULT" | sed -n '1p')
+    _HB_MAX_TX=$(echo "$_HB_RESULT" | sed -n '2p')
+    _SUMMARY_BLOCKS=$(grep "Total Blocks Created:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
+    if [ "${_HB_MAX_BLOCKS:-0}" -gt "${_SUMMARY_BLOCKS:-0}" ]; then
+        log "WARN: HTTP stats reported ${_SUMMARY_BLOCKS} blocks but heartbeat captured ${_HB_MAX_BLOCKS} — using heartbeat floor (OOM kills likely reset node counters)"
+        sed -i "s/Total Blocks Created: ${_SUMMARY_BLOCKS}/Total Blocks Created: ${_HB_MAX_BLOCKS}/" "${SUMMARY_FILE}"
+        _SUMMARY_TX=$(grep "Total Transactions in Blocks:" "${SUMMARY_FILE}" | tail -1 | awk '{print $NF}')
+        if [ "${_HB_MAX_TX:-0}" -gt "${_SUMMARY_TX:-0}" ]; then
+            sed -i "s/Total Transactions in Blocks: ${_SUMMARY_TX}/Total Transactions in Blocks: ${_HB_MAX_TX}/" "${SUMMARY_FILE}"
+        fi
+    fi
+fi
 
 log "${GREEN}✓ Statistics collected${NC}"
 echo
@@ -776,6 +1054,14 @@ if [ -f "${RESULTS_FILE}" ]; then
                 fi
             fi
         fi
+        # Per-shard TX rate: confirmed tx/s divided across the number of active shards.
+        NUM_SHARDS=$(( NUMBER_OF_NODES / NUMBER_OF_NODES_PER_SHARD ))
+        if [ "${NUM_SHARDS:-0}" -gt 0 ] && [ "${TOTAL_ELAPSED:-0}" -gt 0 ] && [ "${TX_IN_BLOCKS:-0}" -gt 0 ]; then
+            PER_SHARD_TX_RATE=$(echo "scale=2; ${TX_IN_BLOCKS} / ${TOTAL_ELAPSED} / ${NUM_SHARDS}" | bc)
+            echo "Per-Shard TX Rate (tx/s),${PER_SHARD_TX_RATE}"
+        fi
+        # Median EMA round time — backs the finality bounds claim.
+        echo "Median Round Time (ms),${MEDIAN_ROUND_MS:-0}"
         # Config metadata — read back by compare-performance.sh for the report
         echo "Number of Nodes Used,${NUMBER_OF_NODES}"
         echo "Nodes Per Shard,${NUMBER_OF_NODES_PER_SHARD}"

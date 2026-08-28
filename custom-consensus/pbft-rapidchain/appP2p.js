@@ -72,7 +72,8 @@ app.get('/stats', async (request, response) => {
   const stats = {
     total: blockchain.getTotal(),
     rate,
-    isFaulty: IS_FAULTY
+    isFaulty: IS_FAULTY,
+    avgRoundMs: p2pserver.avgRoundMs
   }
   logger.log(`REQUEST STATS FOR #${SUBSET_INDEX}:`, JSON.stringify(stats))
   response.json(stats)
@@ -88,13 +89,16 @@ async function processTransactions(data) {
     logger.debug(`Processing transaction on ${HTTP_PORT}`, JSON.stringify(item))
     const transaction = wallet.createTransaction(item)
     p2pserver.parseMessage({ type: MESSAGE_TYPE.transaction, transaction, port: P2P_PORT })
-    p2pserver.broadcastTransaction(P2P_PORT, transaction)
   }
 }
 
 // creates transactions for the sent data
 app.post('/transaction', async (request, response) => {
   const { IS_FAULTY, REDIRECT_TO_URL, SHOULD_REDIRECT_FROM_FAULTY_NODES } = config.get()
+  // Faulty nodes are fully isolated — reject all transactions immediately.
+  if (IS_FAULTY) {
+    return response.status(503).json({ ok: false, code: 'FAULTY_NODE' })
+  }
   const unassignedTransactions = transactionPool.transactions.unassigned
   const hasUnassignedTransactions = unassignedTransactions && unassignedTransactions.length > 0
   if (

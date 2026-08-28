@@ -102,6 +102,7 @@ DEPLOY_STRICT_THRESHOLD="0"
 # shards' TXs merge into healthy shards). Off means enhanced degrades to raw sharded
 # PBFT, which is not what we want to benchmark. Rapidchain ignores this env var.
 DEPLOY_ENABLE_SHARD_MERGE="1"
+DEPLOY_ENABLE_PIPELINING="1"
 # Rapidchain-only: BLOCK_THRESHOLD = number of shard blocks the committee accumulates
 # before opening a PBFT validation round. Default 1 = per-block validation, the most
 # literal reading of Zamani et al. (CCS 2018) where the reference committee validates
@@ -121,8 +122,16 @@ DEPLOY_CPU_LIMIT=""                     # blank → sqrt-scaled from DEPLOY_NPS
 DEPLOY_POD_MEMORY_MIB=""                # blank → sqrt-scaled from DEPLOY_NPS
 DEPLOY_NODE_OPTIONS=""                  # passed as NODE_OPTIONS env var to each pod; e.g. "--max-old-space-size=1100" to cap V8 heap below pod memory limit and avoid OOMKill at NPS>=100
 
+# ─── journal mode defaults (--journal-mode) ──────────────────────────────────
+# Provisions the cluster once, then runs both consensus systems JOURNAL_NUM_RUNS
+# times each on the same cluster — one clean provision per NPS point.
+JOURNAL_MODE=false
+JOURNAL_SYSTEMS="enhanced rapidchain"   # space-separated; override to single system
+JOURNAL_NUM_RUNS=3                      # independent runs per system (~95 % CI)
+JOURNAL_OUTPUT_DIR=""                   # blank → journal-vertical-nps${NPS}-${TIMESTAMP}/
+
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)_$$
 CLUSTER_TAG="blockchain-cluster-${TIMESTAMP}"
 
 # runtime state — populated as we go, read by cleanup()
@@ -165,6 +174,7 @@ while [[ $# -gt 0 ]]; do
         --deploy-tx-threshold) DEPLOY_TRANSACTION_THRESHOLD="$2"; shift 2 ;;
         --deploy-jmeter-duration) DEPLOY_JMETER_DURATION="$2";   shift 2 ;;
         --deploy-enable-shard-merge) DEPLOY_ENABLE_SHARD_MERGE="$2"; shift 2 ;;
+        --deploy-enable-pipelining) DEPLOY_ENABLE_PIPELINING="$2"; shift 2 ;;
         --deploy-block-threshold) DEPLOY_BLOCK_THRESHOLD="$2";   shift 2 ;;
         --deploy-strict-threshold) DEPLOY_STRICT_THRESHOLD="$2"; shift 2 ;;
         --deploy-jmeter-threads)  DEPLOY_JMETER_THREADS="$2";    shift 2 ;;
@@ -172,6 +182,10 @@ while [[ $# -gt 0 ]]; do
         --deploy-cpu-limit)       DEPLOY_CPU_LIMIT="$2";         shift 2 ;;
         --deploy-pod-memory-mib)  DEPLOY_POD_MEMORY_MIB="$2";    shift 2 ;;
         --deploy-node-options)    DEPLOY_NODE_OPTIONS="$2";      shift 2 ;;
+        --journal-mode)         JOURNAL_MODE=true;             shift   ;;
+        --journal-systems)      JOURNAL_SYSTEMS="$2";          shift 2 ;;
+        --num-runs)             JOURNAL_NUM_RUNS="$2";         shift 2 ;;
+        --journal-output)       JOURNAL_OUTPUT_DIR="$2";       shift 2 ;;
         -h|--help)
             sed -n '3,50p' "$0"; exit 0 ;;
         *) err "Unknown option: $1"; exit 1 ;;
@@ -415,6 +429,11 @@ cat > "$USERDATA_MASTER_FILE" << 'MASTER_UD'
 set -euo pipefail
 exec > /var/log/userdata.log 2>&1
 
+# AL2023 ships with firewalld enabled. Disable it so the master can initiate
+# curl connections to agent pod ports without OS-level firewall interference.
+systemctl stop firewalld  2>/dev/null || true
+systemctl disable firewalld 2>/dev/null || true
+
 # Amazon Linux 2023 ships curl-minimal by default (satisfies the k3s installer's
 # curl need). Install jq only; --allowerasing lets us upgrade curl-minimal to
 # full curl if we ever need it, without dnf refusing due to conflicts.
@@ -545,8 +564,15 @@ cat > "$USERDATA_AGENT_FILE" << AGENT_UD
 set -euo pipefail
 exec > /var/log/userdata.log 2>&1
 
-# curl-minimal is pre-installed on AL2023 and satisfies the k3s installer.
-# No extra packages needed for the agent role.
+# AL2023 ships with firewalld enabled. It blocks inbound access to pod ports
+# (3001-3048 for blockchain stats) even though the EC2 SG allows them.
+# Disable it so the master can curl http://AGENT_IP:PORT/stats directly.
+systemctl stop firewalld  2>/dev/null || true
+systemctl disable firewalld 2>/dev/null || true
+
+# Resolve this instance's primary private IP for --node-ip. Without this, k3s
+# may advertise a wrong IP to the apiserver, causing 502 errors on kubectl exec.
+PRIVATE_IP=\$(curl -sf http://169.254.169.254/latest/meta-data/local-ipv4 || hostname -I | awk '{print \$1}')
 
 # Registration-storm jitter: EC2 Fleet launches all N agents at essentially
 # the same instant, so N k3s agents all fire their install + register-with-
@@ -559,8 +585,11 @@ sleep \$(( RANDOM % 60 ))
 
 # Join the k3s cluster as an agent. --server points at the master's PRIVATE IP
 # (VPC-internal networking; no public-net traffic between cluster nodes).
+# --node-ip ensures the kubelet advertises the correct private IP, preventing
+# 502 errors when the apiserver proxies kubectl exec to the kubelet.
 curl -sfL https://get.k3s.io | K3S_URL=https://${MASTER_PRIVATE_IP}:6443 \
                               K3S_TOKEN=${K3S_TOKEN} \
+                              INSTALL_K3S_EXEC="agent --node-ip \${PRIVATE_IP}" \
                               sh -
 
 echo "==> k3s agent joined at \$(date)"
@@ -774,6 +803,270 @@ echo -e "    ${YELLOW}ssh -i $KEY_FILE ec2-user@$MASTER_PUBLIC_IP${NC}"
 echo ""
 
 # ═════════════════════════════════════════════════════════════════════════════
+# STEP 7 (journal mode): --journal-mode — provision once, run both consensus
+# systems JOURNAL_NUM_RUNS times each for journal-grade paired reproducibility.
+#
+# Typical invocation for the vertical study (NPS=16, 48 nodes, 33% faulty):
+#   ./run-on-aws-cluster.sh \
+#     --nodes 48 --deploy-nps 16 --deploy-faulty 15 \
+#     --journal-mode --num-runs 3 \
+#     --deploy-jmeter-duration 300 \
+#     --aws-access-key KEY --aws-secret-key SECRET
+# ═════════════════════════════════════════════════════════════════════════════
+if [[ "$JOURNAL_MODE" == "true" ]]; then
+    _NPS="${DEPLOY_NPS:-$NUMBER_OF_NODES}"
+    _FAULTY="${DEPLOY_FAULTY_NODES:-0}"
+
+    # Auto-scale CPU + memory per pod (same formula as --deploy-blockchain step)
+    if [[ -z "$DEPLOY_CPU_LIMIT" ]]; then
+        DEPLOY_CPU_LIMIT=$(python3 -c "
+import math
+nps = float(${_NPS})
+val = max(0.60, min(1.80, 0.60 * math.sqrt(nps / 4.0)))
+print(f'{val:.2f}')
+")
+    fi
+    if [[ -z "$DEPLOY_POD_MEMORY_MIB" ]]; then
+        DEPLOY_POD_MEMORY_MIB=$(python3 -c "
+import math
+nps = float(${_NPS})
+val = max(512, min(3584, int(512 * math.sqrt(nps / 4.0))))
+print(val)
+")
+    fi
+
+    JOURNAL_OUTPUT_DIR="${JOURNAL_OUTPUT_DIR:-${SCRIPT_DIR}/journal-vertical-nps${_NPS}-${TIMESTAMP}}"
+    mkdir -p "$JOURNAL_OUTPUT_DIR"
+
+    _jbanner() {
+        echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
+        echo -e "${CYAN}  $*${NC}"
+        echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
+    }
+
+    _jbanner "Journal mode: NPS=${_NPS}, N=${NUMBER_OF_NODES}, Faulty=${_FAULTY}"
+    info "  Systems  : $JOURNAL_SYSTEMS"
+    info "  Runs/sys : $JOURNAL_NUM_RUNS"
+    info "  CPU/pod  : ${DEPLOY_CPU_LIMIT} vCPU (auto-sqrt-scaled)"
+    info "  Mem/pod  : ${DEPLOY_POD_MEMORY_MIB} MiB (auto-sqrt-scaled)"
+    info "  JMeter   : ${DEPLOY_JMETER_DURATION}s / ${DEPLOY_JMETER_THREADS} threads"
+    info "  Output   : $JOURNAL_OUTPUT_DIR"
+
+    # ── J.0 — Copy SSH key to master so it can reach agents via VPC ───────
+    info "Copying SSH key to master..."
+    scp $SSH_OPTS "$KEY_FILE" "ec2-user@$MASTER_PUBLIC_IP:~/.ssh/cluster-key.pem" &>/dev/null
+    $SSH "chmod 600 ~/.ssh/cluster-key.pem"
+    ok "  SSH key installed on master"
+
+    # ── J.0b — Upload monitor-resources.sh ────────────────────────────────
+    if [[ -f "${SCRIPT_DIR}/monitor-resources.sh" ]]; then
+        scp $SSH_OPTS "${SCRIPT_DIR}/monitor-resources.sh" \
+            "ec2-user@${MASTER_PUBLIC_IP}:~/monitor-resources.sh" &>/dev/null
+        $SSH "chmod +x ~/monitor-resources.sh"
+        ok "  monitor-resources.sh installed"
+    else
+        warn "  monitor-resources.sh not found — resource metrics skipped"
+    fi
+
+    # ── J.1 — Install common prereqs once
+    info "Installing prereqs on master (Docker, Java, JMeter, Node.js, pnpm)..."
+    $SSH 'bash -s' << 'JPREQS'
+set -euo pipefail
+sudo dnf install -y -q --allowerasing docker jq rsync tar socat >/dev/null
+sudo systemctl enable --now docker >/dev/null 2>&1 || true
+sudo systemctl start docker >/dev/null 2>&1 || true
+sudo usermod -aG docker ec2-user 2>/dev/null || true
+sudo dnf install -y -q --allowerasing java-21-amazon-corretto-headless >/dev/null
+if ! command -v jmeter &>/dev/null; then
+    curl -fsSLo /tmp/jmeter.tgz "https://downloads.apache.org/jmeter/binaries/apache-jmeter-5.6.3.tgz"
+    sudo tar xf /tmp/jmeter.tgz -C /opt >/dev/null
+    sudo ln -sf /opt/apache-jmeter-5.6.3/bin/jmeter /usr/local/bin/jmeter
+    rm /tmp/jmeter.tgz
+fi
+if ! command -v node &>/dev/null || [[ "$(node -v 2>/dev/null | cut -c2-3)" != "20" ]]; then
+    curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash - >/dev/null
+    sudo dnf install -y -q --allowerasing nodejs >/dev/null
+fi
+sudo corepack enable >/dev/null 2>&1 || true
+sudo corepack prepare pnpm@10 --activate >/dev/null 2>&1 || true
+corepack prepare pnpm@10 --activate >/dev/null 2>&1 || true
+echo "==> Prereqs installed."
+JPREQS
+    ok "  prereqs installed"
+
+    # ── J.2 — Per-system loop ──────────────────────────────────────────────
+    _J_PASS=0; _J_FAIL=0
+
+    for _JSYS in $JOURNAL_SYSTEMS; do
+        _JSYS_DIR="pbft-${_JSYS}"
+
+        if [[ "$_JSYS" == "rapidchain" ]]; then
+            _JIMG_P2P="lebaz20/blockchain-rapidchain-p2p-server:latest"
+            _JIMG_CORE="lebaz20/blockchain-rapidchain-core-server:latest"
+        else
+            _JIMG_P2P="lebaz20/blockchain-p2p-server:latest"
+            _JIMG_CORE="lebaz20/blockchain-core-server:latest"
+        fi
+
+        _jbanner "Journal: system=${_JSYS} — building + distributing images"
+
+        # J.2a — rsync source for this system
+        info "  Rsyncing ${_JSYS_DIR} to master..."
+        $SSH "mkdir -p ~/blockchain/custom-consensus/${_JSYS_DIR}"
+        rsync -az --delete \
+            --exclude=node_modules --exclude=coverage --exclude=performance-results \
+            --exclude=diagrams --exclude=temp --exclude=server.log --exclude=jmeter.log \
+            --exclude='*.jtl' --exclude=.DS_Store \
+            -e "ssh $SSH_OPTS" \
+            "${SCRIPT_DIR}/${_JSYS_DIR}/" \
+            "ec2-user@${MASTER_PUBLIC_IP}:~/blockchain/custom-consensus/${_JSYS_DIR}/"
+        ok "    source uploaded"
+
+        # J.2b — install Node deps + build Docker images on master
+        info "  Building Docker images for ${_JSYS}..."
+        $SSH "bash -s" << JBUILD
+set -euo pipefail
+cd ~/blockchain/custom-consensus/${_JSYS_DIR}
+HUSKY=0 pnpm install --frozen-lockfile
+export DOCKER_BUILDKIT=1
+sudo DOCKER_BUILDKIT=1 docker build --no-cache -f Dockerfile.p2p  -t ${_JIMG_P2P}  .
+sudo DOCKER_BUILDKIT=1 docker build --no-cache -f Dockerfile.core -t ${_JIMG_CORE} .
+sudo docker save ${_JIMG_P2P}  | sudo k3s ctr images import -
+sudo docker save ${_JIMG_CORE} | sudo k3s ctr images import -
+echo "==> Images built and imported on master."
+JBUILD
+        ok "    images built"
+
+        # J.2c — distribute images to every agent in parallel
+        info "  Distributing images to $NUMBER_OF_NODES agents..."
+        $SSH "bash -s" << JDIST
+set -uo pipefail
+AGENT_IPS=\$(kubectl get nodes --no-headers -l '!node-role.kubernetes.io/control-plane' -o wide 2>/dev/null | awk '{print \$6}')
+echo "==> Saving image tars on master..."
+sudo docker save ${_JIMG_P2P}  | sudo tee /tmp/jdist-p2p.tar  > /dev/null
+sudo docker save ${_JIMG_CORE} | sudo tee /tmp/jdist-core.tar > /dev/null
+sudo chmod 644 /tmp/jdist-p2p.tar /tmp/jdist-core.tar
+echo "==> Distributing in parallel..."
+pids=()
+for AGENT in \$AGENT_IPS; do
+  (
+    if scp -o StrictHostKeyChecking=no -o ConnectTimeout=20 -i ~/.ssh/cluster-key.pem -q \
+        /tmp/jdist-p2p.tar /tmp/jdist-core.tar ec2-user@\$AGENT:/tmp/ 2>&1; then
+      ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20 -i ~/.ssh/cluster-key.pem \
+          ec2-user@\$AGENT \
+          'sudo k3s ctr images import /tmp/jdist-p2p.tar && sudo k3s ctr images import /tmp/jdist-core.tar && rm /tmp/jdist-p2p.tar /tmp/jdist-core.tar' \
+          2>&1 && echo "  ok \$AGENT" || echo "  fail \$AGENT: import failed"
+    else
+      echo "  fail \$AGENT: scp failed"
+    fi
+  ) & pids+=(\$!)
+done
+_JDFAIL=0
+for pid in "\${pids[@]}"; do wait "\$pid" || _JDFAIL=\$((_JDFAIL+1)); done
+rm -f /tmp/jdist-p2p.tar /tmp/jdist-core.tar
+echo "==> Distribution complete (agent failures=\$_JDFAIL)."
+JDIST
+        ok "    images distributed"
+
+        # Patch start.sh to skip redundant docker build (images pre-loaded)
+        $SSH "sed -i 's|^docker build|# docker build (pre-loaded into containerd)|' ~/blockchain/custom-consensus/${_JSYS_DIR}/start.sh || true"
+
+        # J.2d — run JOURNAL_NUM_RUNS independent tests for this system
+        for (( _JRUN=1; _JRUN<=JOURNAL_NUM_RUNS; _JRUN++ )); do
+            _jbanner "Journal: ${_JSYS} run ${_JRUN}/${JOURNAL_NUM_RUNS}"
+
+            _JRUN_SCRIPT="/tmp/jrun-${_JSYS}-${_JRUN}.sh"
+            cat << JRUNSCRIPT | $SSH "cat > ${_JRUN_SCRIPT}"
+#!/bin/bash
+set -euo pipefail
+ulimit -n 1048576 2>/dev/null || ulimit -n 65536 2>/dev/null || true
+export KUBECONFIG=/home/ec2-user/.kube/config
+[[ ! -f \$KUBECONFIG ]] && sudo cp /etc/rancher/k3s/k3s.yaml \$KUBECONFIG && sudo chown ec2-user:ec2-user \$KUBECONFIG
+
+export NUMBER_OF_NODES=${NUMBER_OF_NODES}
+export NUMBER_OF_FAULTY_NODES=${_FAULTY}
+export NUMBER_OF_NODES_PER_SHARD=${_NPS}
+export HAS_COMMITTEE_SHARD=${DEPLOY_COMMITTEE_SHARD}
+export TRANSACTION_THRESHOLD=${DEPLOY_TRANSACTION_THRESHOLD}
+export BLOCK_THRESHOLD=${DEPLOY_BLOCK_THRESHOLD}
+export ENABLE_SHARD_MERGE=${DEPLOY_ENABLE_SHARD_MERGE}
+export ENABLE_PIPELINING=${DEPLOY_ENABLE_PIPELINING}
+export STRICT_BLOCK_THRESHOLD=${DEPLOY_STRICT_THRESHOLD}
+export CPU_LIMIT=${DEPLOY_CPU_LIMIT}
+export POD_MEMORY_MIB=${DEPLOY_POD_MEMORY_MIB}
+export NODE_OPTIONS="${DEPLOY_NODE_OPTIONS}"
+export USE_HOST_NETWORK=true
+export SPREAD_PODS_ACROSS_NODES=true
+export AUTOMATED_TEST=true
+export JMETER_DURATION=${DEPLOY_JMETER_DURATION}
+${DEPLOY_JMETER_THREADS:+export JMETER_THREADS=${DEPLOY_JMETER_THREADS}}
+${DEPLOY_JMETER_THROUGHPUT:+export JMETER_THROUGHPUT=${DEPLOY_JMETER_THROUGHPUT}}
+export PATH=\$PATH:/usr/local/bin
+
+cd ~/blockchain/custom-consensus/${_JSYS_DIR}
+chmod +x start.sh run-performance-test.sh
+
+_RES_CSV=/tmp/${_JSYS}-run${_JRUN}-res.csv
+_MON_PID=""
+if [[ -x ~/monitor-resources.sh ]]; then
+    SAMPLE_INTERVAL=5 ~/monitor-resources.sh "\$_RES_CSV" "${_JSYS}" > /tmp/mon-${_JSYS}-${_JRUN}.log 2>&1 &
+    _MON_PID=\$!
+    echo "==> resource monitor PID \$_MON_PID"
+fi
+trap '[[ -n "\${_MON_PID:-}" ]] && kill -TERM "\$_MON_PID" 2>/dev/null || true' EXIT
+
+./run-performance-test.sh 2>&1 | tee /tmp/jrun-${_JSYS}-${_JRUN}.log
+_TEST_RC=\${PIPESTATUS[0]}
+
+sleep 5
+if [[ -n "\${_MON_PID:-}" ]] && kill -0 "\$_MON_PID" 2>/dev/null; then
+    kill -TERM "\$_MON_PID" 2>/dev/null || true
+    wait "\$_MON_PID" 2>/dev/null || true
+fi
+echo "==> run ${_JRUN} complete (rc=\$_TEST_RC)"
+exit \$_TEST_RC
+JRUNSCRIPT
+            $SSH "chmod +x ${_JRUN_SCRIPT}"
+
+            _jrun_exit=0
+            $SSH -t "${_JRUN_SCRIPT}" || _jrun_exit=$?
+
+            # Download this run's results to a dedicated local directory
+            _LOCAL_RUN="${JOURNAL_OUTPUT_DIR}/${_JSYS}-run${_JRUN}"
+            mkdir -p "$_LOCAL_RUN"
+            rsync -az --no-perms -e "ssh $SSH_OPTS" \
+                "ec2-user@${MASTER_PUBLIC_IP}:~/blockchain/custom-consensus/${_JSYS_DIR}/performance-results/" \
+                "$_LOCAL_RUN/performance-results/" 2>/dev/null || true
+            scp $SSH_OPTS \
+                "ec2-user@${MASTER_PUBLIC_IP}:/tmp/jrun-${_JSYS}-${_JRUN}.log" \
+                "$_LOCAL_RUN/run.log" 2>/dev/null || true
+            scp $SSH_OPTS \
+                "ec2-user@${MASTER_PUBLIC_IP}:/tmp/${_JSYS}-run${_JRUN}-res.csv" \
+                "$_LOCAL_RUN/resources.csv" 2>/dev/null || true
+            rsync -az --no-perms -e "ssh $SSH_OPTS" \
+                "ec2-user@${MASTER_PUBLIC_IP}:~/blockchain/custom-consensus/${_JSYS_DIR}/pod-logs/" \
+                "$_LOCAL_RUN/pod-logs/" 2>/dev/null || true
+
+            # Clear remote performance-results so the next run starts clean
+            $SSH "rm -rf ~/blockchain/custom-consensus/${_JSYS_DIR}/performance-results/ 2>/dev/null || true"
+
+            if [[ $_jrun_exit -eq 0 ]]; then
+                ok "  ${_JSYS} run ${_JRUN} passed → $_LOCAL_RUN"
+                _J_PASS=$((_J_PASS + 1))
+            else
+                warn "  ${_JSYS} run ${_JRUN} exit=${_jrun_exit} — partial results in $_LOCAL_RUN"
+                _J_FAIL=$((_J_FAIL + 1))
+            fi
+        done   # end runs loop
+    done   # end systems loop
+
+    _jbanner "Journal finished — Passed: ${_J_PASS}  Failed: ${_J_FAIL}"
+    log "All results: $JOURNAL_OUTPUT_DIR"
+    # cleanup trap handles cluster teardown automatically on exit
+    [[ $_J_FAIL -gt 0 ]] && exit 1 || exit 0
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
 # STEP 7 (optional): --deploy-blockchain — install/build/run the specified
 # consensus system on the cluster, then tear down.
 #
@@ -849,6 +1142,7 @@ print(val)
         info "  BLOCK_THRESHOLD           = $DEPLOY_BLOCK_THRESHOLD (Zamani et al. per-block default; override with --deploy-block-threshold)"
     else
         info "  ENABLE_SHARD_MERGE        = $DEPLOY_ENABLE_SHARD_MERGE"
+        info "  ENABLE_PIPELINING         = $DEPLOY_ENABLE_PIPELINING"
         info "  STRICT_BLOCK_THRESHOLD    = $DEPLOY_STRICT_THRESHOLD (1=fire only on full pool, matches RapidChain)"
     fi
 
@@ -891,25 +1185,25 @@ set -euo pipefail
 # Docker (needed for image builds; k3s uses containerd but we build w/ docker)
 # socat: kernel-level TCP relay used to forward master localhost:PORT → agent-IP:PORT
 # in multi-EC2 mode (see run-performance-test.sh for the setup block).
-sudo dnf install -y -q --allowerasing docker jq rsync tar socat
-sudo systemctl enable --now docker
-sudo usermod -aG docker ec2-user || true
+sudo dnf install -y -q --allowerasing docker jq rsync tar socat >/dev/null
+sudo systemctl enable --now docker >/dev/null 2>&1 || true
+sudo usermod -aG docker ec2-user 2>/dev/null || true
 # Java + JMeter for the load generator
-sudo dnf install -y -q --allowerasing java-21-amazon-corretto-headless
+sudo dnf install -y -q --allowerasing java-21-amazon-corretto-headless >/dev/null
 if ! command -v jmeter &>/dev/null; then
     curl -fsSLo /tmp/jmeter.tgz "https://downloads.apache.org/jmeter/binaries/apache-jmeter-5.6.3.tgz"
-    sudo tar xf /tmp/jmeter.tgz -C /opt
+    sudo tar xf /tmp/jmeter.tgz -C /opt >/dev/null
     sudo ln -sf /opt/apache-jmeter-5.6.3/bin/jmeter /usr/local/bin/jmeter
     rm /tmp/jmeter.tgz
 fi
 # Node.js 20 + pnpm 10
 if ! command -v node &>/dev/null || [[ "$(node -v 2>/dev/null | cut -c2-3)" != "20" ]]; then
-    curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
-    sudo dnf install -y -q --allowerasing nodejs
+    curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash - >/dev/null
+    sudo dnf install -y -q --allowerasing nodejs >/dev/null
 fi
-sudo corepack enable 2>/dev/null || true
-sudo corepack prepare pnpm@10 --activate 2>/dev/null || true
-corepack prepare pnpm@10 --activate 2>/dev/null || true
+sudo corepack enable >/dev/null 2>&1 || true
+sudo corepack prepare pnpm@10 --activate >/dev/null 2>&1 || true
+corepack prepare pnpm@10 --activate >/dev/null 2>&1 || true
 echo "==> Prereqs installed."
 MASTER_PREREQS
     ok "  prereqs installed"
@@ -1032,6 +1326,7 @@ export BLOCK_THRESHOLD=${DEPLOY_BLOCK_THRESHOLD}
 # architecture (dead-shard TXs merge into healthy shards) instead of a degraded
 # raw-sharded-PBFT variant. Rapidchain ignores this env var.
 export ENABLE_SHARD_MERGE=${DEPLOY_ENABLE_SHARD_MERGE}
+export ENABLE_PIPELINING=${DEPLOY_ENABLE_PIPELINING}
 # Enhanced-only: strict-threshold gate so enhanced fires only when pool is full
 # (default 1 = matched with RapidChain for tx-per-block parity). Rapidchain
 # ignores this env var.

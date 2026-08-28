@@ -15,7 +15,8 @@ const {
   CORE,
   PEERS,
   COMMITTEE_PEERS,
-  COMMITTEE_SUBSET
+  COMMITTEE_SUBSET,
+  DELTA_MS
 } = config.get()
 
 const P2P_PORT = process.env.P2P_PORT || 5001
@@ -67,6 +68,8 @@ class P2pserver {
     // Vote pools for atomic view-change: targetView → Set<publicKey>.
     this._viewChangeVotes = new Map()
     this._committeeViewChangeVotes = new Map()
+    // Tracks new-view messages already applied — prevents double-jump on gossip relay.
+    this._seenNewViews = new Set()
     // Silent-proposer detection timers. Regular and committee flows MUST have
     // separate timers — before this split, both flows shared a single
     // `_blockCreationTimeout`, so committee's clear/reschedule could
@@ -74,7 +77,23 @@ class P2pserver {
     // nodes where both flows are active simultaneously.
     this._blockCreationTimeout = null
     this._committeeBlockCreationTimeout = null
+    // Round-time tracking: timestamp when this node broadcasts PRE_PREPARE for a block.
+    // Used to compute actual PBFT round duration (PRE_PREPARE → NEW BLOCK ADDED TO CHAIN).
+    this._blockProposedAt = {}
+    // EMA-smoothed PBFT round time in ms. Start at 25000 ms (RapidChain's fixed timeout)
+    // so the first measurement is a reasonable prior.
+    this._avgRoundMs = 25000
+    // SyncBFT notarization state.
+    // A block is "notarized" when it receives MIN_APPROVALS commits (majority quorum).
+    // A block is "finalized" when 3 consecutive notarized blocks appear in the chain —
+    // the Δ-timer guarantees any honest node that committed in epoch e is reflected by e+2.
+    this._notarizedChain = []        // ordered list of { blockHash, epoch } as notarized
+    this._notarizedSet = new Set()   // fast existence check
+    this._finalizedHashes = new Set()
+    this._syncBFTEpoch = 0
   }
+
+  get avgRoundMs() { return this._avgRoundMs }
 
   listen() {
     const server = new WebSocket.Server({ port: P2P_PORT })
@@ -145,6 +164,15 @@ class P2pserver {
       const total = this.blockchain.getTotal()
       this.broadcastRateToCore(rate, total)
     }, TIMEOUTS.RATE_BROADCAST_INTERVAL_MS)
+
+    // SyncBFT Δ-timer: every 2×DELTA_MS advance the epoch counter.
+    // Under synchrony, any honest node that sent a message in epoch e has its
+    // message received by all honest nodes before epoch e+1 — so missing votes
+    // after one epoch must be from faulty nodes and can be ignored.
+    setInterval(() => {
+      this._syncBFTEpoch++
+      logger.log(P2P_PORT, `[SYNCBFT] epoch=${this._syncBFTEpoch}`)
+    }, 2 * DELTA_MS)
 
     // Diagnostic-only: every 10s, print a compact snapshot of mesh state so we
     // can see whether peers accumulate then collapse, or never accumulate at
@@ -522,6 +550,22 @@ class P2pserver {
     })
   }
 
+  // broadcasts new-view signal when view-change quorum is reached so stale nodes
+  // that haven't accumulated enough votes jump directly to the new view.
+  broadcastNewView(senderPort, targetView, isCommittee = false) {
+    this.idaGossip.sendToShardPeers({
+      message: {
+        type: MESSAGE_TYPE.new_view,
+        port: P2P_PORT,
+        newView: { targetView, isCommittee }
+      },
+      chunkKey: 'newView',
+      socketsKey: isCommittee ? 'committeePeers' : 'peers',
+      senderPort,
+      consensusMessage: false
+    })
+  }
+
   // broadcasts block to core
   broadcastBlockToCore(block, isCommittee = false) {
     this.idaGossip.sendToCore({
@@ -739,7 +783,7 @@ class P2pserver {
         // Sub-threshold drain: if this node is the proposer and ready, create a
         // block with whatever TX are available.
         if (isProposer && this._canProposeBlock(isCommittee)) {
-          this._createAndBroadcastBlock(P2P_PORT, currentOffset, isCommittee)
+          this._createAndBroadcastBlock(P2P_PORT, isCommittee, currentOffset)
         } else {
           // Keep trying with the current offset while waiting for quorum
           this.initiateBlockCreation(P2P_PORT, false, isCommittee)
@@ -798,6 +842,7 @@ class P2pserver {
 
     // Proposer adds block to its own pool (needed for addUpdatedBlock look-up on commit)
     this.blockPool.addBlock(block, isCommittee)
+    this._blockProposedAt[block.hash] = Date.now()
     // Standard PBFT: the proposer implicitly casts a prepare for its own block.
     // Broadcast it immediately so non-proposer nodes reach MIN_APPROVALS even when
     // one shard peer is faulty (only 3 non-faulty nodes, all three must vote).
@@ -966,7 +1011,7 @@ class P2pserver {
           : this.transactionPool.transactions.unassigned.length
       )
       this.broadcastTransaction(data.port, data.transaction, isCommittee)
-      this.initiateBlockCreation(data.port, false, isCommittee)
+      this.initiateBlockCreation(data.port, true, isCommittee)
     } else if (_exists) {
       logger.debug(
         P2P_PORT,
@@ -982,23 +1027,28 @@ class P2pserver {
     if (!isCommittee && viewOffset > this._viewOffset) this._viewOffset = viewOffset
     if (isCommittee && viewOffset > this._committeeViewOffset)
       this._committeeViewOffset = viewOffset
-    // Proposer is working — cancel the view-change countdown
     const _timerKey = isCommittee ? '_committeeBlockCreationTimeout' : '_blockCreationTimeout'
-    clearTimeout(this[_timerKey])
-    this[_timerKey] = null
-    logger.log(
-      P2P_PORT,
-      `[VC-TIMER-CLEAR] reason=received-pre-prepare isCommittee=${isCommittee}`
-    )
     if (
       !this.blockPool.existingBlock(block, isCommittee) &&
       this.blockchain.isValidBlock(block, blocksCount, previousBlock, isCommittee, viewOffset)
     ) {
+      // Proposer is working — cancel the view-change countdown only after validation succeeds
+      clearTimeout(this[_timerKey])
+      this[_timerKey] = null
+      logger.log(
+        P2P_PORT,
+        `[VC-TIMER-CLEAR] reason=received-pre-prepare isCommittee=${isCommittee}`
+      )
       this.blockPool.addBlock(block, isCommittee)
       this.transactionPool.assignTransactions(block, isCommittee)
       this.broadcastPrePrepare(data.port, block, blocksCount, previousBlock, isCommittee)
 
       if (block?.hash) {
+        // Non-proposer nodes record when they first see the proposal so they also
+        // update _avgRoundMs at commit. ||= keeps the proposer's earlier timestamp.
+        if (!isCommittee) {
+          this._blockProposedAt[block.hash] = this._blockProposedAt[block.hash] || Date.now()
+        }
         const prepare = this.preparePool.prepare(block, this.wallet, isCommittee)
         this.broadcastPrepare(data.port, prepare, isCommittee)
       }
@@ -1040,96 +1090,124 @@ class P2pserver {
       const blockNotInChain = !this.blockchain.existingBlock(data.commit.blockHash, isCommittee)
 
       if (commitList.length >= MIN_APPROVALS && blockNotInChain) {
-        const result = await this.blockchain.addUpdatedBlock(
-          data.commit.blockHash,
-          this.blockPool,
-          this.preparePool,
-          this.commitPool,
-          isCommittee
+        // SyncBFT: notarize on quorum.
+        // Tentative commit: clear pool + trigger next block immediately so the pipeline doesn't stall.
+        // Persistent chain write happens only after 3 consecutive notarized blocks (finalization).
+        if (!this._notarizedSet.has(data.commit.blockHash)) {
+          this._notarizedSet.add(data.commit.blockHash)
+          this._notarizedChain.push({ blockHash: data.commit.blockHash, epoch: this._syncBFTEpoch })
+          logger.log(
+            P2P_PORT,
+            `[SYNCBFT] NOTARIZED epoch=${this._syncBFTEpoch} hash=${data.commit.blockHash.slice(0, 8)} notarizedLen=${this._notarizedChain.length}`
+          )
+
+          // At notarize time: reset view state, clear pool, broadcast round change.
+          // This lets every honest node (all of which reach MIN_APPROVALS commits) clear
+          // their own pools and restart proposals without waiting for finalization.
+          const notarizedBlock = this.blockPool.getBlock(data.commit.blockHash, isCommittee)
+          if (notarizedBlock) {
+            const _timerKey = isCommittee ? '_committeeBlockCreationTimeout' : '_blockCreationTimeout'
+            clearTimeout(this[_timerKey])
+            this[_timerKey] = null
+            logger.log(P2P_PORT, `[VC-TIMER-CLEAR] reason=notarized isCommittee=${isCommittee}`)
+            if (isCommittee) {
+              this._committeeViewOffset = 0
+              this._committeeInactivityViewRotated = false
+              this._committeePoolWasFullThisEpoch = false
+              this._committeeViewChangeVotes = new Map()
+            } else {
+              this._viewOffset = 0
+              this._inactivityViewRotated = false
+              this._poolWasFullThisEpoch = false
+              this._viewChangeVotes = new Map()
+            }
+            this.transactionPool.clear(data.commit.blockHash, notarizedBlock.data, isCommittee)
+            const _pendingCount = isCommittee
+              ? this.transactionPool.committeeTransactions.unassigned.length
+              : this.transactionPool.transactions.unassigned.length
+            const _seenSize = isCommittee
+              ? this.transactionPool.committeeTransactionIds.size
+              : this.transactionPool.transactionIds.size
+            logger.log(
+              P2P_PORT,
+              `BLOCK NOTARIZED shard=${SUBSET_INDEX} block=#${data.commit.blockHash.slice(0, 8)}` +
+                ` txInBlock=${notarizedBlock.data.length} pendingAfter=${_pendingCount}` +
+                ` seenIndex=${_seenSize} notarizedLen=${this._notarizedChain.length}`
+            )
+            if (_pendingCount > 0) {
+              this.initiateBlockCreation(P2P_PORT, false, isCommittee)
+            }
+            // Round change for this notarized block so all nodes clear their pools.
+            const message = this.messagePool.createMessage(notarizedBlock, this.wallet, isCommittee)
+            this.broadcastRoundChange(data.port, message, isCommittee)
+            // Free messagePool entry — broadcast is done, no longer needed
+            delete this.messagePool.list[data.commit.blockHash]
+          }
+        }
+        await this._checkSyncBFTFinalization(isCommittee)
+      }
+    }
+  }
+
+  async _checkSyncBFTFinalization(isCommittee) {
+    const chain = this._notarizedChain
+    // Walk the notarized chain looking for 3 consecutive blocks — the first of the triple finalizes.
+    // Pool clearing and view reset happen at NOTARIZE time; this method only persists to chain.
+    for (let i = 0; i + 2 < chain.length; i++) {
+      const a = chain[i]
+      if (this._finalizedHashes.has(a.blockHash)) continue
+      this._finalizedHashes.add(a.blockHash)
+      logger.log(
+        P2P_PORT,
+        `[SYNCBFT] FINALIZED (3-consecutive) hash=${a.blockHash.slice(0, 8)} notarizedLen=${chain.length}`
+      )
+
+      const result = await this.blockchain.addUpdatedBlock(
+        a.blockHash,
+        this.blockPool,
+        this.preparePool,
+        this.commitPool,
+        isCommittee
+      )
+
+      if (result !== false) {
+        this.broadcastBlockToCore(result, isCommittee)
+        const _proposedAt = this._blockProposedAt[a.blockHash]
+        if (_proposedAt) {
+          const _roundMs = Date.now() - _proposedAt
+          if (_roundMs > 0) this._avgRoundMs = 0.7 * this._avgRoundMs + 0.3 * _roundMs
+          delete this._blockProposedAt[a.blockHash]
+        }
+        const chainLength = isCommittee
+          ? this.blockchain.committeeChain.length
+          : this.blockchain.chain[SUBSET_INDEX].length
+        logger.log(
+          P2P_PORT,
+          `[SYNCBFT] BLOCK COMMITTED shard=${SUBSET_INDEX} block=#${a.blockHash.slice(0, 8)}` +
+            ` chainLen=${chainLength} isCommittee=${isCommittee}`
         )
+        // Free PBFT pool memory — prevents unbounded growth across blocks
+        const _listKey = isCommittee ? 'committeeList' : 'list'
+        delete this.preparePool[_listKey][a.blockHash]
+        delete this.commitPool[_listKey][a.blockHash]
+        const _blockArr = isCommittee ? this.blockPool.committeeBlocks : this.blockPool.blocks
+        const _bi = _blockArr.findIndex((b) => b.hash === a.blockHash)
+        if (_bi !== -1) _blockArr.splice(_bi, 1)
+      } else {
+        const chainLength = isCommittee
+          ? this.blockchain.committeeChain.length
+          : this.blockchain.chain[SUBSET_INDEX].length
+        logger.error(P2P_PORT, 'NEW BLOCK FAILED TO ADD TO BLOCK CHAIN, TOTAL STILL:', chainLength)
+      }
 
-        if (result !== false) {
-          // Block committed — cancel view-change countdown and reset offset for next round
-          const _timerKey = isCommittee
-            ? '_committeeBlockCreationTimeout'
-            : '_blockCreationTimeout'
-          clearTimeout(this[_timerKey])
-          this[_timerKey] = null
-          logger.log(
-            P2P_PORT,
-            `[VC-TIMER-CLEAR] reason=block-committed isCommittee=${isCommittee}`
-          )
-          if (isCommittee) {
-            this._committeeViewOffset = 0
-            this._committeeInactivityViewRotated = false
-            this._committeePoolWasFullThisEpoch = false
-            this._committeeViewChangeVotes = new Map()
-          } else {
-            this._viewOffset = 0
-            this._inactivityViewRotated = false
-            this._poolWasFullThisEpoch = false
-            this._viewChangeVotes = new Map()
-          }
-          this.broadcastBlockToCore(result, isCommittee)
-          const chainLength = isCommittee
-            ? this.blockchain.committeeChain.length
-            : this.blockchain.chain[SUBSET_INDEX].length
-
-          logger.log(
-            P2P_PORT,
-            'NEW BLOCK ADDED TO BLOCK CHAIN, TOTAL NOW:',
-            chainLength,
-            data.commit.blockHash
-          )
-
-          const latestBlock = isCommittee
-            ? this.blockchain.committeeChain[this.blockchain.committeeChain.length - 1]
-            : this.blockchain.chain[SUBSET_INDEX][this.blockchain.chain[SUBSET_INDEX].length - 1]
-
-          const message = this.messagePool.createMessage(latestBlock, this.wallet)
-          // Immediately clear pool and start next block — don't wait for round-change quorum.
-          // The PBFT commit phase already guarantees 2f+1 agreement — all honest nodes that
-          // reach here have already committed. Clearing immediately eliminates one full P2P
-          // gossip round-trip of dead time between every consecutive block.
-          this.transactionPool.clear(data.commit.blockHash, result.data, isCommittee)
-          const _pendingCount = isCommittee
-            ? this.transactionPool.committeeTransactions.unassigned.length
-            : this.transactionPool.transactions.unassigned.length
-          const _seenSize = isCommittee
-            ? this.transactionPool.committeeTransactionIds.size
-            : this.transactionPool.transactionIds.size
-          logger.log(
-            P2P_PORT,
-            `BLOCK COMMITTED shard=${SUBSET_INDEX} block=#${data.commit.blockHash.slice(0, 8)}` +
-              ` txInBlock=${result.data.length} pendingAfter=${_pendingCount}` +
-              ` seenIndex=${_seenSize} chainLen=${chainLength}` +
-              ` isCommittee=${isCommittee}`
-          )
-          if (_pendingCount > 0) {
-            this.initiateBlockCreation(P2P_PORT, false, isCommittee)
-          }
-          this.broadcastRoundChange(data.port, message, isCommittee)
-        } else {
-          const chainLength = isCommittee
-            ? this.blockchain.committeeChain.length
-            : this.blockchain.chain[SUBSET_INDEX].length
-
-          logger.error(
-            P2P_PORT,
-            'NEW BLOCK FAILED TO ADD TO BLOCK CHAIN, TOTAL STILL:',
-            chainLength
-          )
+      if (!isCommittee) {
+        const rate = await this.blockchain.getRate(this.sockets.peers)
+        const stats = {
+          total: this.blockchain.getTotal(),
+          rate,
+          unassignedTransactions: this.transactionPool.transactions.unassigned.length
         }
-
-        if (!isCommittee) {
-          const rate = await this.blockchain.getRate(this.sockets.peers)
-          const stats = {
-            total: this.blockchain.getTotal(),
-            rate,
-            unassignedTransactions: this.transactionPool.transactions.unassigned.length
-          }
-          logger.log(P2P_PORT, `P2P STATS FOR #${SUBSET_INDEX}:`, JSON.stringify(stats))
-        }
+        logger.log(P2P_PORT, `P2P STATS FOR #${SUBSET_INDEX}:`, JSON.stringify(stats))
       }
     }
   }
@@ -1143,27 +1221,55 @@ class P2pserver {
     const votes = votesMap.get(targetView)
     if (votes.has(publicKey)) return // deduplicate
     votes.add(publicKey)
+    // Prune stale views to prevent unbounded growth on broken shards
+    const currentOffset = isCommittee ? this._committeeViewOffset : this._viewOffset
+    for (const v of votesMap.keys()) {
+      if (v < currentOffset - 2) votesMap.delete(v)
+    }
     // Relay so all shard peers receive this vote
     this.broadcastViewChange(data.port, data.viewChange, isCommittee)
     // Quorum reached and this view is ahead of where we are — rotate atomically
-    const currentOffset = isCommittee ? this._committeeViewOffset : this._viewOffset
     if (votes.size >= MIN_APPROVALS && targetView > currentOffset) {
       if (isCommittee) this._committeeViewOffset = targetView
       else this._viewOffset = targetView
-      // Reset both epoch flags so initiateBlockCreation (called immediately below)
-      // can fire another vote right away if the NEW proposer at this view is also
-      // faulty — eliminates the 10 s timeout wait for consecutive faulty proposers.
-      const poolFullFlag = isCommittee ? '_committeePoolWasFullThisEpoch' : '_poolWasFullThisEpoch'
+      // Only reset the inactivity flag so the timeout can fire again for the new
+      // proposer. Do NOT reset poolWasFullThisEpoch — that flag stays true until a
+      // block is notarized. Resetting it here causes a pool-full vote cascade: all
+      // honest nodes immediately vote for view N+1 before the new honest proposer at
+      // view N can distribute its block (IDA delivery takes ~500 ms).
       const rotatedFlag = isCommittee ? '_committeeInactivityViewRotated' : '_inactivityViewRotated'
-      this[poolFullFlag] = false
       this[rotatedFlag] = false
       // Return all TX that are assigned to the abandoned block back to the
       // unassigned pool immediately — new proposer can pick them up at once
       // instead of waiting up to 30 s for the safety-reassignment timers.
       this.transactionPool.releaseAssigned(isCommittee)
       logger.log(P2P_PORT, 'VIEW CHANGE (quorum) — rotating to view', targetView)
+      // Broadcast new-view so stale nodes that haven't accumulated MIN_APPROVALS
+      // votes jump directly to targetView without waiting for another timer cycle.
+      this.broadcastNewView(P2P_PORT, targetView, isCommittee)
       this.initiateBlockCreation(P2P_PORT, false, isCommittee)
     }
+  }
+
+  _handleNewView(data) {
+    const { targetView, isCommittee } = data.newView
+    const currentOffset = isCommittee ? this._committeeViewOffset : this._viewOffset
+    if (targetView <= currentOffset) return
+    const key = `${isCommittee ? 'c' : 's'}-${targetView}`
+    if (this._seenNewViews.has(key)) return
+    this._seenNewViews.add(key)
+    // Cap set size to prevent unbounded growth on broken shards
+    if (this._seenNewViews.size > 50) {
+      const oldest = this._seenNewViews.values().next().value
+      this._seenNewViews.delete(oldest)
+    }
+    if (isCommittee) this._committeeViewOffset = targetView
+    else this._viewOffset = targetView
+    const rotatedFlag = isCommittee ? '_committeeInactivityViewRotated' : '_inactivityViewRotated'
+    this[rotatedFlag] = false
+    this.transactionPool.releaseAssigned(isCommittee)
+    logger.log(P2P_PORT, 'NEW VIEW (catch-up) — jumping to view', targetView)
+    this.initiateBlockCreation(P2P_PORT, false, isCommittee)
   }
 
   _handleRoundChange(data, isCommittee) {
@@ -1201,10 +1307,10 @@ class P2pserver {
   }
 
   async _handleBlockFromCore(data, isCore, isCommittee) {
-    const blockNotInChain = !this.blockchain.existingBlock(data.block.hash, data.subsetIndex)
+    const blockNotInChain = isCommittee || !this.blockchain.existingBlock(data.block.hash, data.subsetIndex)
     const isDifferentShard = data.subsetIndex !== SUBSET_INDEX
 
-    if (blockNotInChain && isDifferentShard && isCore === true) {
+    if (blockNotInChain && (isDifferentShard || isCommittee) && isCore === true) {
       if (!isCommittee) {
         this.blockchain.addBlock(data.block, data.subsetIndex)
         const rate = await this.blockchain.getRate(this.sockets.peers)
@@ -1247,7 +1353,7 @@ class P2pserver {
   async parseMessage(data, isCore, isCommittee = false) {
     logger.debug(P2P_PORT, 'RECEIVED', data.type, data.port)
 
-    if (IS_FAULTY && ![MESSAGE_TYPE.transaction].includes(data.type)) {
+    if (IS_FAULTY) {
       return
     }
 
@@ -1269,6 +1375,9 @@ class P2pserver {
         break
       case MESSAGE_TYPE.view_change:
         this._handleViewChange(data, isCommittee)
+        break
+      case MESSAGE_TYPE.new_view:
+        this._handleNewView(data)
         break
       case MESSAGE_TYPE.block_from_core:
         await this._handleBlockFromCore(data, isCore, isCommittee)

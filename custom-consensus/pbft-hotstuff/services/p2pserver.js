@@ -60,7 +60,7 @@ class P2pserver {
       this.messagePool = messagePool;
       this.validators = validators;
     }
-  
+
     // Creates a server on a given port
     listen() {
       const server = new WebSocket.Server({ port: P2P_PORT });
@@ -72,13 +72,13 @@ class P2pserver {
       this.connectToPeers();
       // console.log(`Listening for peer to peer connection on port : ${P2P_PORT}`);
     }
-  
+
     // connects to a given socket and registers the message handler on it
     connectSocket(socket, peer = P2P_PORT) {
       this.sockets.push(socket);
       // console.log("Socket connected", P2P_PORT, peer);
     }
-  
+
     // connects to the peers passed in command line
     connectToPeers() {
       peers.forEach(peer => {
@@ -90,14 +90,14 @@ class P2pserver {
         });
       });
     }
-  
+
     // broadcasts transactions
     broadcastTransaction(transaction) {
       this.sockets.forEach(socket => {
         this.sendTransaction(socket, transaction);
       });
     }
-  
+
     // sends transactions to a perticular socket
     sendTransaction(socket, transaction) {
       socket.send(
@@ -107,14 +107,14 @@ class P2pserver {
         })
       );
     }
-  
+
     // broadcasts preprepare
     broadcastPrePrepare(block, blocksCount, previousBlock = undefined) {
       this.sockets.forEach(socket => {
         this.sendPrePrepare(socket, block, blocksCount, previousBlock);
       });
     }
-  
+
     // sends preprepare to a particular socket
     sendPrePrepare(socket, block, blocksCount, previousBlock = undefined) {
       socket.send(
@@ -126,14 +126,14 @@ class P2pserver {
         })
       );
     }
-  
+
     // broadcast prepare
     broadcastPrepare(prepare) {
       this.sockets.forEach(socket => {
         this.sendPrepare(socket, prepare);
       });
     }
-  
+
     // sends prepare to a particular socket
     sendPrepare(socket, prepare) {
       socket.send(
@@ -143,14 +143,14 @@ class P2pserver {
         })
       );
     }
-  
+
     // broadcasts preCommit
     broadcastPreCommit(commit) {
       this.sockets.forEach(socket => {
         this.sendPreCommit(socket, commit);
       });
     }
-  
+
     // sends preCommit to a particular socket
     sendPreCommit(socket, commit) {
       socket.send(
@@ -167,7 +167,7 @@ class P2pserver {
         this.sendCommit(socket, commit);
       });
     }
-  
+
     // sends commit to a particular socket
     sendCommit(socket, commit) {
       socket.send(
@@ -177,14 +177,14 @@ class P2pserver {
         })
       );
     }
-  
+
     // broadcasts round change
     broadcastRoundChange(message) {
       this.sockets.forEach(socket => {
         this.sendRoundChange(socket, message);
       });
     }
-  
+
     // sends round change message to a particular socket
     sendRoundChange(socket, message) {
       socket.send(
@@ -194,7 +194,7 @@ class P2pserver {
         })
       );
     }
-  
+
     processTransaction(transaction) {
       // check if transactions is valid
       if (
@@ -206,7 +206,7 @@ class P2pserver {
           transaction
         );
         console.log(P2P_PORT, "TRANSACTION ADDED, TOTAL NOW:", this.transactionPool.transactions.unassigned.length);
-        
+
         // check if limit reached
         if (thresholdReached) {
           console.log(P2P_PORT, "THRESHOLD REACHED, TOTAL NOW:", this.transactionPool.transactions.unassigned.length);
@@ -232,7 +232,7 @@ class P2pserver {
             // assign block transactions to the block
             // TODO: release assignment after x time in case block creation doesn't succeed
             this.transactionPool.assignTransactions(block, this.blockPool);
-            
+
             this.broadcastPrePrepare(block, this.blockchain.chain.length, previousBlock);
           }
         } else {
@@ -249,9 +249,9 @@ class P2pserver {
           message = message.toString(); // Convert Buffer to string
         }
         const data = JSON.parse(message);
-  
+
         console.log(P2P_PORT, "RECEIVED", data.type, "IS_LEADER", IS_LEADER);
-  
+
         // select a particular message handler
         switch (data.type) {
           case MESSAGE_TYPE.transaction:
@@ -284,7 +284,7 @@ class P2pserver {
               ) {
                 // add prepare message to the pool
                 this.preparePool.addPrepare(data.prepare);
-    
+
                 // if no of prepare messages reaches minimum required
                 // send commit message
                 if (
@@ -321,7 +321,7 @@ class P2pserver {
               ) {
                 // add to pool
                 this.commitPool.addCommit(data.commit);
-    
+
                 // if no of commit messages reaches minimum required
                 // add updated block to chain
                 if (
@@ -357,7 +357,7 @@ class P2pserver {
               }
             }
             break;
-  
+
           case MESSAGE_TYPE.round_change:
             if (!IS_LEADER) {
               // check the validity of the round change message
@@ -369,7 +369,7 @@ class P2pserver {
 
                 // add to pool
                 this.messagePool.addMessage(data.message);
-                
+
                 // add newly created block
                 this.blockchain.addBlock(data.message.block);
               }
@@ -379,5 +379,5 @@ class P2pserver {
       });
     }
   }
-  
+
   module.exports = P2pserver;

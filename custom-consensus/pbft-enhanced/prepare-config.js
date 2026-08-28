@@ -170,12 +170,13 @@ fs.writeFileSync(environmentFile, yaml.dump(environmentArray))
 // scaling per NPS; falls back to 256Mi for small standalone runs.
 const memory = `${process.env.POD_MEMORY_MIB || 256}Mi`
 // Enhanced's core-server coordinates shard-merge decisions across shards.
-// Less committee traffic than rapidchain but same "single central coordinator"
-// role — matched memory budget so both systems are compared under equivalent
-// coordinator sizing. Cap 3072 MiB fits c6i.large agents with OS headroom.
+// Core-server targets the control-plane node via nodeAffinity (Exists on the
+// node-role.kubernetes.io/control-plane label) with tolerations for the common
+// NoSchedule taint. Cap 2048 MiB fits on a c6i.large (4 GiB) master alongside
+// k3s, OS, and JMeter. NODE_OPTIONS pins V8's heap ceiling to 80% of the cap.
 const _corePodMib = Math.min(
-  3072,
-  Math.max(1024, Number(process.env.POD_MEMORY_MIB || 256) * 4)
+  2048,
+  Math.max(512, Number(process.env.POD_MEMORY_MIB || 256))
 )
 const coreMemory = `${_corePodMib}Mi`
 const coreNodeOptions = `--max-old-space-size=${Math.floor(_corePodMib * 0.8)}`
@@ -306,6 +307,22 @@ const k8sItems = [
       labels: { app: 'core-server', domain: 'blockchain' }
     },
     spec: {
+      tolerations: [
+        { key: 'node-role.kubernetes.io/control-plane', operator: 'Exists', effect: 'NoSchedule' },
+        { key: 'node-role.kubernetes.io/master', operator: 'Exists', effect: 'NoSchedule' }
+      ],
+      affinity: {
+        nodeAffinity: {
+          requiredDuringSchedulingIgnoredDuringExecution: {
+            nodeSelectorTerms: [{
+              matchExpressions: [{
+                key: 'node-role.kubernetes.io/control-plane',
+                operator: 'Exists'
+              }]
+            }]
+          }
+        }
+      },
       ...(process.env.USE_HOST_NETWORK === 'true'
         ? { hostNetwork: true, dnsPolicy: 'ClusterFirstWithHostNet' }
         : {}),

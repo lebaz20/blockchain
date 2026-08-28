@@ -122,8 +122,7 @@ while $RUNNING; do
     TOP_OUT=$(kubectl top pods -l app=p2p-server --no-headers 2>/dev/null || echo "")
 
     if [[ -z "$TOP_OUT" ]]; then
-        # metrics-server may not be ready yet; emit a placeholder row and retry
-        echo "$TS,$LABEL,0,0,0,0,0,0,0,0" >> "$OUTPUT"
+        # metrics-server not yet ready — skip this sample so zeros don't corrupt means
         sleep "$SAMPLE_INTERVAL"
         continue
     fi

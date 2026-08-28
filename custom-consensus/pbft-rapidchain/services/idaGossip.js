@@ -10,9 +10,29 @@ const { NUMBER_OF_NODES, DEFAULT_TTL, NUMBER_OF_NODES_PER_SHARD } = config.get()
 class IDAGossip {
   constructor() {
     this.fileChunks = new Map() // Store received chunks
+    this._chunkTimestamps = new Map() // key → timestamp for TTL eviction
     this.socketGossipNodes // Connected nodes (all network peers)
     this.socketGossipPeers // Connected peers
     this.socketGossipCore // Connected Core
+    // Evict stale chunks every 20s (cutoff=25s) to prevent IDA chunk accumulation OOM
+    setInterval(() => {
+      const cutoff = Date.now() - 25000
+      for (const [key, ts] of this._chunkTimestamps) {
+        if (ts < cutoff) {
+          this.fileChunks.delete(key)
+          this._chunkTimestamps.delete(key)
+        }
+      }
+      // Hard cap: if still over 3000 entries, evict oldest half
+      if (this.fileChunks.size > 3000) {
+        const sorted = [...this._chunkTimestamps.entries()].sort((a, b) => a[1] - b[1])
+        const toEvict = sorted.slice(0, Math.floor(sorted.length / 2))
+        for (const [key] of toEvict) {
+          this.fileChunks.delete(key)
+          this._chunkTimestamps.delete(key)
+        }
+      }
+    }, 20000).unref()
   }
 
   setNodeSockets(sockets) {
@@ -102,7 +122,11 @@ class IDAGossip {
       //     1-8KB: Good performance for most networks
       //     8-64KB: Acceptable but may cause delays
       //     > 64KB: Risk of fragmentation and timeouts
-      requiredChunks = Math.max(2, Math.ceil(fileSizeKB / 5))
+      // GF(2^8) has 255 non-zero elements; the Vandermonde RS matrix requires
+      // k distinct non-zero field bases, so k must stay below 256.  A 4000-tx
+      // block (~2 MB JSON) would otherwise yield k=400 and cause a singular-
+      // matrix crash during Gaussian elimination.  Cap at 200 for safety margin.
+      requiredChunks = Math.min(200, Math.max(2, Math.ceil(fileSizeKB / 5)))
 
       // Total chunks = required chunks + redundancy (50% more)
       totalChunks = Math.ceil(requiredChunks * 1.5)
@@ -346,6 +370,7 @@ class IDAGossip {
       const chunkKey = `${chunk.fileHash}-${chunk.index}`
       if (!this.fileChunks.has(chunkKey)) {
         this.fileChunks.set(chunkKey, chunk)
+        this._chunkTimestamps.set(chunkKey, Date.now())
 
         if (shouldGossip) {
           // Continue gossiping to other peers
@@ -373,7 +398,7 @@ class IDAGossip {
         keysToDelete.push(key)
       }
     }
-    keysToDelete.forEach((key) => this.fileChunks.delete(key))
+    keysToDelete.forEach((key) => { this.fileChunks.delete(key); this._chunkTimestamps.delete(key) })
   }
 
   // Try to reconstruct data from chunks. Any `dataShards` distinct-index shards

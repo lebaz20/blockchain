@@ -152,6 +152,8 @@ chmod +x journal-comparison.sh monitor-resources.sh compute-stats.py
 export NODE_COUNTS="$scale"
 export FAULT_LEVELS="$faults_csv"
 export NUM_RUNS="$NUM_RUNS"
+export ENHANCED_NODES_PER_SHARD="${ENHANCED_NODES_PER_SHARD:-100}"
+export RAPIDCHAIN_NODES_PER_SHARD="${RAPIDCHAIN_NODES_PER_SHARD:-100}"
 exec ./journal-comparison.sh
 EOF
     chmod +x "$COMPARE_ORIG"
